@@ -307,11 +307,12 @@ func main() {
 	ready.Store(false) // reject /readyz immediately so K8s stops routing traffic
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatal(err)
+	shutdownErr := server.Shutdown(ctx)
+	if shutdownErr != nil {
+		log.Printf("server shutdown error: %v", shutdownErr)
 	}
-	// Close audit queue after server shutdown so in-flight auditReaders
-	// do not panic sending to a closed channel.
+	// Always drain the pipeline regardless of Shutdown outcome so the
+	// collector flushes any buffered telemetry before exit.
 	if auditQueue != nil {
 		close(auditQueue)
 	}
@@ -320,5 +321,8 @@ func main() {
 	}
 	if stopPoller != nil {
 		stopPoller()
+	}
+	if shutdownErr != nil {
+		os.Exit(1)
 	}
 }
