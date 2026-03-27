@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -44,7 +45,15 @@ func (b *bufferPool) Put(buf []byte) {
 	b.pool.Put(buf)
 }
 
-func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
+type proxyConfig struct {
+	targetURL  *url.URL
+	auditPool  blockAllocator    // nil = audit disabled
+	auditQueue chan<- *auditBlock // global audit queue
+	drops      dropRecorder      // nil = no drop tracking
+	nextReqID  *atomic.Uint64    // monotonic request ID generator
+}
+
+func newProxy(cfg proxyConfig) *httputil.ReverseProxy {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
@@ -62,7 +71,7 @@ func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 
 	return &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
-			r.SetURL(targetURL)
+			r.SetURL(cfg.targetURL)
 			r.Out.URL.RawQuery = r.In.URL.RawQuery
 			// Go's Request.write() injects "User-Agent: Go-http-client/1.1"
 			// whenever the header is absent. To preserve transparency when
@@ -70,6 +79,10 @@ func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 			// which suppresses the default without sending a header on the wire.
 			if _, ok := r.In.Header["User-Agent"]; !ok {
 				r.Out.Header["User-Agent"] = []string{""}
+			}
+			if r.Out.Body != nil && cfg.auditPool != nil {
+				reqID := cfg.nextReqID.Add(1)
+				r.Out.Body = newAuditReader(r.Out.Body, cfg.auditPool, cfg.drops, cfg.auditQueue, reqID)
 			}
 		},
 		Transport:  transport,
@@ -80,6 +93,10 @@ func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 func main() {
 	target := flag.String("target", "", "upstream API URL (e.g., https://api.openai.com)")
 	listen := flag.String("listen", "localhost:8080", "address to listen on")
+	auditCapacity := flag.Int("audit-capacity", defaultPoolCapacity, "audit buffer pool size in bytes (0 to disable)")
+	auditBlockSize := flag.Int("audit-block-size", defaultBlockSize, "audit buffer block size in bytes")
+	auditQueueSize := flag.Int("audit-queue-size", defaultQueueSize, "audit queue slot count")
+	dropPollInterval := flag.Duration("drop-poll-interval", defaultDropPollInterval, "interval for polling drop counter")
 	flag.Parse()
 
 	if *target == "" {
@@ -97,7 +114,29 @@ func main() {
 		log.Fatalf("target URL must have http or https scheme, got %q", targetURL.Scheme)
 	}
 
-	proxy := newProxy(targetURL)
+	cfg := proxyConfig{targetURL: targetURL}
+
+	var auditQueue chan *auditBlock
+	var stopPoller func()
+	if *auditCapacity > 0 {
+		pool := newBlockPool(*auditCapacity, *auditBlockSize)
+		auditQueue = make(chan *auditBlock, *auditQueueSize)
+		drops := newDropCounter()
+		cfg.auditPool = pool
+		cfg.auditQueue = auditQueue
+		cfg.drops = drops
+		cfg.nextReqID = &atomic.Uint64{}
+		go func() {
+			for blk := range auditQueue {
+				pool.put(blk)
+			}
+		}()
+		stopPoller = startDropPoller(context.Background(), drops, *dropPollInterval, log.Default())
+		log.Printf("audit capture enabled: pool=%dMB, block=%dKB, queue=%d",
+			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize)
+	}
+
+	proxy := newProxy(cfg)
 
 	server := &http.Server{
 		Addr:    *listen,
@@ -120,5 +159,13 @@ func main() {
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal(err)
+	}
+	// Close audit queue after server shutdown so in-flight auditReaders
+	// do not panic sending to a closed channel.
+	if auditQueue != nil {
+		close(auditQueue)
+	}
+	if stopPoller != nil {
+		stopPoller()
 	}
 }

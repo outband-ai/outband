@@ -25,6 +25,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -49,7 +50,7 @@ func (e *proxyTestEnv) close() {
 func newProxyTestEnv(upstream http.Handler) *proxyTestEnv {
 	us := httptest.NewServer(upstream)
 	usURL, _ := url.Parse(us.URL)
-	p := newProxy(usURL)
+	p := newProxy(proxyConfig{targetURL: usURL})
 	ps := httptest.NewServer(p)
 	return &proxyTestEnv{Upstream: us, Proxy: ps, UpstreamURL: usURL}
 }
@@ -324,7 +325,7 @@ func TestUpstreamTimeout(t *testing.T) {
 		DisableCompression:    true,
 	}
 
-	p := newProxy(usURL)
+	p := newProxy(proxyConfig{targetURL: usURL})
 	p.Transport = transport
 	timeoutProxy := httptest.NewServer(p)
 	defer timeoutProxy.Close()
@@ -402,6 +403,225 @@ func TestErrorPassthrough(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Audit Integration Tests
+// ---------------------------------------------------------------------------
+
+// auditProxyTestEnv extends proxyTestEnv with audit capture components.
+type auditProxyTestEnv struct {
+	proxyTestEnv
+	Pool  *blockPool
+	Queue chan *auditBlock
+	Drops *mockDropRecorder
+}
+
+func (e *auditProxyTestEnv) close() {
+	e.proxyTestEnv.close()
+}
+
+func newAuditProxyTestEnv(upstream http.Handler, poolBytes, blockSize int) *auditProxyTestEnv {
+	us := httptest.NewServer(upstream)
+	usURL, _ := url.Parse(us.URL)
+
+	pool := newBlockPool(poolBytes, blockSize)
+	queue := make(chan *auditBlock, 256)
+	drops := &mockDropRecorder{}
+
+	p := newProxy(proxyConfig{
+		targetURL:  usURL,
+		auditPool:  pool,
+		auditQueue: queue,
+		drops:      drops,
+		nextReqID:  &atomic.Uint64{},
+	})
+	ps := httptest.NewServer(p)
+
+	return &auditProxyTestEnv{
+		proxyTestEnv: proxyTestEnv{Upstream: us, Proxy: ps, UpstreamURL: usURL},
+		Pool:         pool,
+		Queue:        queue,
+		Drops:        drops,
+	}
+}
+
+func TestAuditLargePayloadStreaming(t *testing.T) {
+	const payloadSize = 5 * 1024 * 1024 // 5MB
+
+	firstByteReceived := make(chan time.Time, 1)
+	allBytesReceived := make(chan int64, 1)
+
+	env := newAuditProxyTestEnv(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		buf := make([]byte, 64*1024)
+		var total int64
+		for {
+			n, err := r.Body.Read(buf)
+			if n > 0 {
+				total += int64(n)
+				if total == int64(n) {
+					firstByteReceived <- time.Now()
+				}
+			}
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				t.Errorf("upstream read error: %v", err)
+				break
+			}
+		}
+		allBytesReceived <- total
+		w.WriteHeader(http.StatusOK)
+	}), 10*1024*1024, 64*1024) // 10MB pool, 64KB blocks
+	defer env.close()
+
+	pr, pw := io.Pipe()
+	uploadStart := time.Now()
+	go func() {
+		chunk := make([]byte, 64*1024)
+		var written int64
+		for written < payloadSize {
+			n := int64(len(chunk))
+			if written+n > payloadSize {
+				n = payloadSize - written
+			}
+			pw.Write(chunk[:n])
+			written += n
+			if written < payloadSize {
+				time.Sleep(1 * time.Millisecond)
+			}
+		}
+		pw.Close()
+	}()
+
+	req, _ := http.NewRequest("POST", env.Proxy.URL+"/v1/chat/completions", pr)
+	req.ContentLength = -1
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	firstByte := <-firstByteReceived
+	total := <-allBytesReceived
+
+	// Upstream must start receiving bytes well before the entire upload completes.
+	streamingDelay := firstByte.Sub(uploadStart)
+	if streamingDelay > 5*time.Second {
+		t.Errorf("upstream received first byte after %v, proxy may be buffering", streamingDelay)
+	}
+	if total != payloadSize {
+		t.Errorf("upstream received %d bytes, want %d", total, payloadSize)
+	}
+	if env.Drops.count.Load() != 0 {
+		t.Errorf("unexpected drops: %d", env.Drops.count.Load())
+	}
+}
+
+func TestAuditPoolExhaustion(t *testing.T) {
+	const blockSize = 64 * 1024
+	const poolBytes = 2 * blockSize // only 2 blocks = 128KB
+	const payloadSize = 1024 * 1024 // 1MB
+
+	var upstreamTotal atomic.Int64
+
+	env := newAuditProxyTestEnv(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		data, _ := io.ReadAll(r.Body)
+		upstreamTotal.Store(int64(len(data)))
+		w.WriteHeader(http.StatusOK)
+	}), poolBytes, blockSize)
+	defer env.close()
+
+	payload := strings.Repeat("x", payloadSize)
+	req, _ := http.NewRequest("POST", env.Proxy.URL+"/v1/chat/completions",
+		strings.NewReader(payload))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+
+	// Fail-open: upstream must receive the full payload.
+	if got := upstreamTotal.Load(); got != payloadSize {
+		t.Errorf("upstream received %d bytes, want %d", got, payloadSize)
+	}
+
+	// Drops must have occurred.
+	if got := env.Drops.count.Load(); got == 0 {
+		t.Error("expected drops > 0 due to pool exhaustion")
+	}
+
+	// Pool exhaustion counter must have incremented.
+	if got := env.Pool.exhaustions.Load(); got == 0 {
+		t.Error("expected pool exhaustions > 0")
+	}
+}
+
+func TestAuditRequestIDGrouping(t *testing.T) {
+	const blockSize = 256
+	const poolBytes = 100 * blockSize
+
+	env := newAuditProxyTestEnv(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusOK)
+	}), poolBytes, blockSize)
+	defer env.close()
+
+	// Send 3 concurrent requests with payloads larger than one block.
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			payload := strings.Repeat("a", 3*blockSize+50)
+			req, _ := http.NewRequest("POST", env.Proxy.URL+"/v1/chat/completions",
+				strings.NewReader(payload))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			resp.Body.Close()
+		}()
+	}
+	wg.Wait()
+
+	// Small delay to let queue drain in-flight blocks.
+	time.Sleep(50 * time.Millisecond)
+
+	// Collect all blocks from the queue.
+	blocks := collectBlocks(env.Queue)
+
+	// Group blocks by requestID.
+	grouped := make(map[uint64][]*auditBlock)
+	for _, blk := range blocks {
+		grouped[blk.requestID] = append(grouped[blk.requestID], blk)
+	}
+
+	if len(grouped) != 3 {
+		t.Errorf("expected 3 distinct requestIDs, got %d", len(grouped))
+	}
+
+	// For each request, verify sequential ordering and a terminal block.
+	for reqID, reqBlocks := range grouped {
+		// Sort by seq to verify ordering.
+		slices.SortFunc(reqBlocks, func(a, b *auditBlock) int {
+			return int(a.seq) - int(b.seq)
+		})
+
+		for i, blk := range reqBlocks {
+			if blk.seq != uint32(i) {
+				t.Errorf("requestID %d: block %d has seq=%d, want %d", reqID, i, blk.seq, i)
+			}
+		}
+
+		// Last block must be final or abort.
+		last := reqBlocks[len(reqBlocks)-1]
+		if !last.final && !last.abort {
+			t.Errorf("requestID %d: last block has neither final nor abort set", reqID)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
 
@@ -474,7 +694,7 @@ func BenchmarkProxySequential(b *testing.B) {
 	})
 
 	b.Run("proxied", func(b *testing.B) {
-		proxy := newProxy(upstreamURL)
+		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()
 
@@ -561,7 +781,7 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 	})
 
 	b.Run("proxied", func(b *testing.B) {
-		proxy := newProxy(upstreamURL)
+		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()
 
@@ -674,7 +894,7 @@ func BenchmarkProxyStreaming(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			targetURL := tc.url
 			if tc.name == "proxied" {
-				proxy := newProxy(upstreamURL)
+				proxy := newProxy(proxyConfig{targetURL: upstreamURL})
 				proxyServer := httptest.NewServer(proxy)
 				defer proxyServer.Close()
 				targetURL = proxyServer.URL
@@ -707,4 +927,79 @@ func BenchmarkProxyStreaming(b *testing.B) {
 			}
 		})
 	}
+}
+
+func BenchmarkAuditGCImpact(b *testing.B) {
+	const payloadSize = 10 * 1024 // 10KB per request
+
+	requestBody := bytes.Repeat([]byte("x"), payloadSize)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.Copy(io.Discard, r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(chatCompletionResponse)
+	}))
+	defer upstream.Close()
+	upstreamURL, _ := url.Parse(upstream.URL)
+
+	b.Run("audit-disabled", func(b *testing.B) {
+		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+		proxyServer := httptest.NewServer(proxy)
+		defer proxyServer.Close()
+
+		b.SetBytes(payloadSize)
+		before := gcStats()
+
+		for range b.N {
+			req, _ := http.NewRequest("POST", proxyServer.URL+"/v1/chat/completions",
+				bytes.NewReader(requestBody))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+
+		after := gcStats()
+		logGCDelta(b, "audit-disabled", before, after, b.N)
+	})
+
+	b.Run("audit-enabled", func(b *testing.B) {
+		pool := newBlockPool(10*1024*1024, 64*1024) // 10MB pool
+		queue := make(chan *auditBlock, 256)
+		go func() {
+			for blk := range queue {
+				pool.put(blk)
+			}
+		}()
+		defer close(queue)
+
+		proxy := newProxy(proxyConfig{
+			targetURL:  upstreamURL,
+			auditPool:  pool,
+			auditQueue: queue,
+			drops:      newDropCounter(),
+			nextReqID:  &atomic.Uint64{},
+		})
+		proxyServer := httptest.NewServer(proxy)
+		defer proxyServer.Close()
+
+		b.SetBytes(payloadSize)
+		before := gcStats()
+
+		for range b.N {
+			req, _ := http.NewRequest("POST", proxyServer.URL+"/v1/chat/completions",
+				bytes.NewReader(requestBody))
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				b.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+
+		after := gcStats()
+		logGCDelta(b, "audit-enabled", before, after, b.N)
+	})
 }
