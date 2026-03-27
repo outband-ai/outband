@@ -16,6 +16,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -150,6 +152,14 @@ func (t *WebhookTarget) Push(ctx context.Context, summary *EvidenceSummary) erro
 	const maxRetries = 3
 	backoff := 500 * time.Millisecond
 
+	// Generate a single idempotency key so all retry attempts are
+	// deduplicated by the receiving server.
+	var idempotencyKey string
+	var keyBuf [16]byte
+	if _, err := rand.Read(keyBuf[:]); err == nil {
+		idempotencyKey = hex.EncodeToString(keyBuf[:])
+	}
+
 	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			select {
@@ -165,6 +175,9 @@ func (t *WebhookTarget) Push(ctx context.Context, summary *EvidenceSummary) erro
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		if idempotencyKey != "" {
+			req.Header.Set("Idempotency-Key", idempotencyKey)
+		}
 		for k, v := range t.headers {
 			req.Header.Set(k, v)
 		}

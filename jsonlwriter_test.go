@@ -64,8 +64,12 @@ func TestJSONLWriterBasicWrite(t *testing.T) {
 	defer w.Close()
 
 	batch := makeBatch(5)
-	if err := w.Flush(batch); err != nil {
+	n, err := w.Flush(batch)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if n != 5 {
+		t.Fatalf("written: got %d, want 5", n)
 	}
 
 	// Read back and verify each line is valid JSON.
@@ -101,7 +105,7 @@ func TestJSONLWriterSizeRotation(t *testing.T) {
 
 	// Each batch should exceed 200 bytes total, triggering rotation.
 	for i := 0; i < 5; i++ {
-		if err := w.Flush(makeBatch(3)); err != nil {
+		if _, err := w.Flush(makeBatch(3)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -124,11 +128,11 @@ func TestJSONLWriterAgeRotation(t *testing.T) {
 	}
 	defer w.Close()
 
-	if err := w.Flush(makeBatch(1)); err != nil {
+	if _, err := w.Flush(makeBatch(1)); err != nil {
 		t.Fatal(err)
 	}
 	time.Sleep(2 * time.Millisecond)
-	if err := w.Flush(makeBatch(1)); err != nil {
+	if _, err := w.Flush(makeBatch(1)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,7 +152,7 @@ func TestJSONLWriterRetention(t *testing.T) {
 
 	// Force multiple rotations.
 	for i := 0; i < 10; i++ {
-		if err := w.Flush(makeBatch(3)); err != nil {
+		if _, err := w.Flush(makeBatch(3)); err != nil {
 			t.Fatal(err)
 		}
 		// Small sleep to ensure unique timestamps in filenames.
@@ -170,11 +174,11 @@ func TestJSONLWriterNoSplitAcrossFiles(t *testing.T) {
 	}
 	defer w.Close()
 
-	if err := w.Flush(makeBatch(3)); err != nil {
+	if _, err := w.Flush(makeBatch(3)); err != nil {
 		t.Fatal(err)
 	}
 	// This batch should trigger rotation; all 3 records go to the new file.
-	if err := w.Flush(makeBatch(3)); err != nil {
+	if _, err := w.Flush(makeBatch(3)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,10 +210,10 @@ func TestJSONLWriterEmptyBatch(t *testing.T) {
 	}
 	defer w.Close()
 
-	if err := w.Flush(nil); err != nil {
+	if _, err := w.Flush(nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Flush([]*telemetryLog{}); err != nil {
+	if _, err := w.Flush([]*telemetryLog{}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -222,7 +226,7 @@ func TestJSONLWriterResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w1.Flush(makeBatch(2)); err != nil {
+	if _, err := w1.Flush(makeBatch(2)); err != nil {
 		t.Fatal(err)
 	}
 	w1.Close()
@@ -232,7 +236,7 @@ func TestJSONLWriterResume(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w2.Flush(makeBatch(3)); err != nil {
+	if _, err := w2.Flush(makeBatch(3)); err != nil {
 		t.Fatal(err)
 	}
 	w2.Close()

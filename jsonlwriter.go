@@ -84,20 +84,25 @@ func NewJSONLWriter(dir string, maxSize int64, maxAge time.Duration, maxFiles in
 // Flush serializes and appends a batch of telemetry logs. It performs
 // synchronous pre-write rotation if needed: the entire triggering batch
 // goes to the new file, never split across files.
-func (w *JSONLWriter) Flush(batch []*telemetryLog) error {
+//
+// Returns the number of entries successfully written and any error.
+// On partial failure, written < len(batch) and err != nil. The caller
+// should only treat batch[:written] as persisted.
+func (w *JSONLWriter) Flush(batch []*telemetryLog) (int, error) {
 	if len(batch) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	batchEstimate := int64(len(batch)) * w.avgEntrySize
 
 	if w.needsRotation(batchEstimate) {
 		if err := w.rotate(); err != nil {
-			return err
+			return 0, err
 		}
 	}
 
-	var totalWritten int64
+	var totalBytes int64
+	written := 0
 	for _, entry := range batch {
 		line, err := json.Marshal(entry)
 		if err != nil {
@@ -105,21 +110,22 @@ func (w *JSONLWriter) Flush(batch []*telemetryLog) error {
 		}
 		line = append(line, '\n')
 		n, err := w.file.Write(line)
-		totalWritten += int64(n)
+		totalBytes += int64(n)
 		if err != nil {
 			// Update currentBytes with partial writes so needsRotation
 			// sees the correct on-disk size on the next call.
-			w.currentBytes += totalWritten
-			return err
+			w.currentBytes += totalBytes
+			return written, err
 		}
+		written++
 	}
 
-	if len(batch) > 0 && totalWritten > 0 {
-		actualAvg := totalWritten / int64(len(batch))
+	if written > 0 && totalBytes > 0 {
+		actualAvg := totalBytes / int64(written)
 		w.avgEntrySize = (w.avgEntrySize + actualAvg) / 2
 	}
-	w.currentBytes += totalWritten
-	return nil
+	w.currentBytes += totalBytes
+	return written, nil
 }
 
 // Close flushes and closes the current file.

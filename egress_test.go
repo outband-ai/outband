@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -157,6 +158,41 @@ func TestWebhookTargetName(t *testing.T) {
 	target := NewWebhookTarget("http://example.com", nil)
 	if target.Name() != "webhook" {
 		t.Fatalf("name: got %q", target.Name())
+	}
+}
+
+func TestWebhookTargetIdempotencyKey(t *testing.T) {
+	var keys []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		mu.Unlock()
+		if len(keys) < 3 {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	target := NewWebhookTarget(srv.URL, nil)
+	if err := target.Push(context.Background(), testSummary()); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(keys) < 2 {
+		t.Fatal("expected at least 2 attempts")
+	}
+	if keys[0] == "" {
+		t.Fatal("idempotency key is empty")
+	}
+	for i := 1; i < len(keys); i++ {
+		if keys[i] != keys[0] {
+			t.Fatalf("idempotency key changed across retries: %q vs %q", keys[0], keys[i])
+		}
 	}
 }
 

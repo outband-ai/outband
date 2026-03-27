@@ -153,12 +153,11 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 		catCopy[k] = v
 	}
 
-	// Compute processed as audited + dropped so both counters come from the
-	// same lifecycle phase (flush-time for audited, drop-time for dropped).
-	// This avoids the skew caused by counting processed at ingress and
-	// audited at flush — requests near window boundaries would land in
-	// different windows, producing wrong coverage percentages.
-	processed := a.requestsAudited + droppedCount
+	// Use latencySamples as the total request count — it is incremented in
+	// RecordLatency for every request that transits the proxy (including
+	// bodiless GETs that never enter the audit pipeline). audited+dropped
+	// would miss those, understating total traffic.
+	processed := a.latencySamples
 	var coverage float64
 	if processed > 0 {
 		coverage = float64(a.requestsAudited) / float64(processed) * 100

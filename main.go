@@ -346,14 +346,17 @@ func main() {
 				flushInterval: *flushInterval,
 				input:         resultsChannel,
 				flush: func(batch []*telemetryLog) {
-					if err := jsonlWriter.Flush(batch); err != nil {
+					written, err := jsonlWriter.Flush(batch)
+					if err != nil {
 						log.Printf("JSONL write error: %v", err)
 						ioErrors.Add(1)
 						metrics.flushErrors.Inc()
 					}
-					aggregator.Ingest(batch)
-					metrics.requestsAudited.Add(float64(len(batch)))
-					for _, entry := range batch {
+					// Only ingest the entries that were actually persisted.
+					persisted := batch[:written]
+					aggregator.Ingest(persisted)
+					metrics.requestsAudited.Add(float64(len(persisted)))
+					for _, entry := range persisted {
 						for _, cat := range entry.PIICategoriesFound {
 							metrics.piiDetected.WithLabelValues(cat).Inc()
 						}
@@ -486,6 +489,7 @@ func main() {
 	// 4. Budget the internal flush — 5-second deadline enforced via goroutine.
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer flushCancel()
+	pipelineStopped := true
 	if waitPipeline != nil {
 		pipelineDone := make(chan struct{})
 		go func() {
@@ -496,40 +500,52 @@ func main() {
 		case <-pipelineDone:
 		case <-flushCtx.Done():
 			log.Println("warning: pipeline flush exceeded 5s budget")
+			pipelineStopped = false
 		}
 	}
 
 	// 5. Stop the evidence ticker.
+	tickerStopped := true
 	if tickerCancel != nil {
 		tickerCancel()
 		select {
 		case <-tickerDone:
 		case <-flushCtx.Done():
 			log.Println("warning: ticker drain exceeded budget")
+			tickerStopped = false
 		}
 	}
 
-	// 6. Final partial evidence report — force immediately, local JSON only.
-	// Compute per-window deltas from the last ticker report.
-	if drops != nil && aggregator != nil {
-		finalDrops := uint64(drops.total.Load() - lastDropsReported)
-		finalIOErrs := ioErrors.Load() - lastIOErrsReported
-		summary := aggregator.SnapshotAndReset(finalIOErrs, finalDrops, true, version)
-		localJSON := NewLocalJSONTarget(*evidenceDir)
-		if err := localJSON.Push(context.Background(), summary); err != nil {
-			log.Printf("CRITICAL: failed to write final evidence summary: %v", err)
+	// 6. Final partial evidence report and cleanup — only safe if both the
+	// pipeline and ticker have fully stopped. If either timed out, the
+	// collector may still be writing to jsonlWriter and reading aggregator
+	// counters. Proceeding would race.
+	if pipelineStopped && tickerStopped {
+		if drops != nil && aggregator != nil {
+			finalDrops := uint64(drops.total.Load() - lastDropsReported)
+			finalIOErrs := ioErrors.Load() - lastIOErrsReported
+			summary := aggregator.SnapshotAndReset(finalIOErrs, finalDrops, true, version)
+			localJSON := NewLocalJSONTarget(*evidenceDir)
+			if err := localJSON.Push(context.Background(), summary); err != nil {
+				log.Printf("CRITICAL: failed to write final evidence summary: %v", err)
+			}
+			if metrics != nil {
+				metrics.evidenceReports.Inc()
+			}
 		}
-		if metrics != nil {
-			metrics.evidenceReports.Inc()
-		}
-	}
 
-	// 7. Cleanup remaining resources.
-	if jsonlWriter != nil {
-		jsonlWriter.Close()
-	}
-	if metricsServer != nil {
-		metricsServer.Shutdown(flushCtx)
+		// 7. Cleanup remaining resources.
+		if jsonlWriter != nil {
+			jsonlWriter.Close()
+		}
+		if metricsServer != nil {
+			metricsServer.Shutdown(flushCtx)
+		}
+	} else {
+		log.Println("warning: skipping final evidence report and cleanup — background drains still running")
+		if metricsServer != nil {
+			metricsServer.Shutdown(flushCtx)
+		}
 	}
 	if stopPoller != nil {
 		stopPoller()
