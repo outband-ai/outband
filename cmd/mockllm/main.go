@@ -57,17 +57,23 @@ func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.Han
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		if r.URL.Path == "/health" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body.Close()
 
-		preview := string(body)
-		if len(preview) > 512 {
-			preview = preview[:512] + "..."
-		}
-		log.Printf("%s %s Content-Length:%d body=%s", r.Method, r.URL.Path, r.ContentLength, preview)
+		log.Printf("%s %s Content-Length:%d", r.Method, r.URL.Path, r.ContentLength)
 
 		var req request
-		json.Unmarshal(body, &req)
+		if len(body) > 0 {
+			if err := json.Unmarshal(body, &req); err != nil {
+				http.Error(w, fmt.Sprintf("invalid JSON: %v", err), http.StatusBadRequest)
+				return
+			}
+		}
 
 		time.Sleep(delay)
 
@@ -152,7 +158,8 @@ func main() {
 		if listen == "" {
 			listen = ":9090"
 		}
-		resp, err := http.Get("http://localhost" + listen + "/health")
+		client := &http.Client{Timeout: 2 * time.Second}
+		resp, err := client.Get("http://localhost" + listen + "/health")
 		if err != nil {
 			os.Exit(1)
 		}
