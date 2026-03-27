@@ -1,0 +1,10 @@
+outband
+cmd/mockllm/mockllm
+*.exe
+*.test
+*.out
+*.prof
+.git
+.idea
+.vscode
+.claude

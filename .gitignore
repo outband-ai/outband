@@ -1,5 +1,6 @@
 # Binaries
 outband
+cmd/mockllm/mockllm
 *.exe
 *.exe~
 *.dll
