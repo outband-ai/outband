@@ -23,7 +23,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 )
@@ -53,8 +52,12 @@ func envInt(key string, fallback int) int {
 }
 
 func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.HandlerFunc {
+	type request struct {
+		Stream bool `json:"stream"`
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		body, _ := io.ReadAll(r.Body)
 		r.Body.Close()
 
 		preview := string(body)
@@ -63,12 +66,12 @@ func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.Han
 		}
 		log.Printf("%s %s Content-Length:%d body=%s", r.Method, r.URL.Path, r.ContentLength, preview)
 
-		stream := strings.Contains(string(body), `"stream":true`) ||
-			strings.Contains(string(body), `"stream": true`)
+		var req request
+		json.Unmarshal(body, &req)
 
 		time.Sleep(delay)
 
-		if stream {
+		if req.Stream {
 			writeSSE(w, chunks, chunkDelay)
 		} else {
 			writeJSON(w)
@@ -144,6 +147,18 @@ func writeSSE(w http.ResponseWriter, chunks int, chunkDelay time.Duration) {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "-health" {
+		listen := os.Getenv("MOCK_LISTEN")
+		if listen == "" {
+			listen = ":9090"
+		}
+		resp, err := http.Get("http://localhost" + listen + "/health")
+		if err != nil || resp.StatusCode != http.StatusOK {
+			os.Exit(1)
+		}
+		os.Exit(0)
+	}
+
 	listen := os.Getenv("MOCK_LISTEN")
 	if listen == "" {
 		listen = ":9090"

@@ -5,6 +5,12 @@ services:
       target: mockllm
     ports:
       - "9090:9090"
+    healthcheck:
+      test: ["CMD", "/mockllm", "-health"]
+      interval: 2s
+      timeout: 2s
+      retries: 3
+      start_period: 2s
     environment:
       MOCK_DELAY: "${MOCK_DELAY:-200ms}"
       MOCK_LISTEN: ":9090"
@@ -19,4 +25,5 @@ services:
       - "8081:8080"
     command: ["--target", "http://mockllm:9090", "--listen", "0.0.0.0:8080"]
     depends_on:
-      - mockllm
+      mockllm:
+        condition: service_healthy

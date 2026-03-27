@@ -1,4 +1,5 @@
 outband
+cmd/mockllm/mockllm
 *.exe
 *.test
 *.out

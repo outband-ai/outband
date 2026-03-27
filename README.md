@@ -58,12 +58,6 @@ Check the mockllm container logs to see the forwarded request.
 
 Override via environment: `MOCK_DELAY=500ms docker compose up`
 
-### Benchmarks
-
-```bash
-go test -bench=. -v
-```
-
 ## Flags
 
 | Flag | Default | Description |
