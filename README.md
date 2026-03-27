@@ -20,6 +20,50 @@ curl -H "Authorization: Bearer $API_KEY" \
      -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}'
 ```
 
+## Docker
+
+Run the proxy with a mock LLM endpoint — no API keys needed:
+
+```bash
+docker compose up
+```
+
+This starts:
+- **proxy** on `localhost:8081` — the outband reverse proxy
+- **mockllm** on `localhost:9090` — a mock LLM that echoes OpenAI-style responses with 200ms simulated latency
+
+Try it:
+
+```bash
+# Standard request
+curl -X POST http://localhost:8081/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}'
+
+# Streaming (SSE)
+curl -X POST http://localhost:8081/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"hello"}],"stream":true}'
+```
+
+Check the mockllm container logs to see the forwarded request.
+
+### Mock Configuration
+
+| Environment Variable | Default | Description |
+|---|---|---|
+| `MOCK_DELAY` | `200ms` | Initial response delay |
+| `MOCK_CHUNKS` | `5` | Number of SSE chunks in streaming mode |
+| `MOCK_CHUNK_DELAY` | `50ms` | Delay between SSE chunks |
+
+Override via environment: `MOCK_DELAY=500ms docker compose up`
+
+### Benchmarks
+
+```bash
+go test -bench=. -v
+```
+
 ## Flags
 
 | Flag | Default | Description |
