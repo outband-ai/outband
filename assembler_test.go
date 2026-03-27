@@ -197,6 +197,7 @@ func TestAssemblerStaleEviction(t *testing.T) {
 	go startAssembler(auditQueue, assemblerConfig{
 		maxPayloadSize: defaultMaxPayloadSize,
 		staleTimeout:   50 * time.Millisecond, // very short for testing
+		sweepInterval:  25 * time.Millisecond,  // fast sweep for testing
 		workerInput:    workerInput,
 		pool:           pool,
 		apiType:        apiTypeOpenAI,
@@ -205,8 +206,8 @@ func TestAssemblerStaleEviction(t *testing.T) {
 	// Send partial block, then wait for it to go stale.
 	auditQueue <- makeBlock(pool, 1, 0, []byte("stale"), false, false)
 
-	// Wait for at least one stale sweep cycle.
-	time.Sleep(staleSweepInterval + 200*time.Millisecond)
+	// Wait for stale sweep to fire (sweepInterval=25ms, staleTimeout=50ms).
+	time.Sleep(200 * time.Millisecond)
 	close(auditQueue)
 
 	// No payload should arrive.

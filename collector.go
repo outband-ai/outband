@@ -14,6 +14,7 @@
 package main
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -50,6 +51,7 @@ type collectorStats struct {
 func startCollector(cfg collectorConfig, stats *collectorStats) {
 	activeBatch := make([]*telemetryLog, 0, cfg.batchSize)
 	var flushing atomic.Bool
+	var flushWg sync.WaitGroup
 
 	ticker := time.NewTicker(cfg.flushInterval)
 	defer ticker.Stop()
@@ -66,7 +68,9 @@ func startCollector(cfg collectorConfig, stats *collectorStats) {
 		flushBatch := activeBatch
 		activeBatch = make([]*telemetryLog, 0, cfg.batchSize)
 		flushing.Store(true)
+		flushWg.Add(1)
 		go func() {
+			defer flushWg.Done()
 			defer flushing.Store(false)
 			cfg.flush(flushBatch)
 		}()
@@ -77,9 +81,7 @@ func startCollector(cfg collectorConfig, stats *collectorStats) {
 		case entry, ok := <-cfg.input:
 			if !ok {
 				// Input closed — wait for any in-flight flush, then final flush.
-				for flushing.Load() {
-					time.Sleep(time.Millisecond)
-				}
+				flushWg.Wait()
 				if len(activeBatch) > 0 {
 					cfg.flush(activeBatch)
 				}

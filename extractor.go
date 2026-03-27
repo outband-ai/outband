@@ -16,6 +16,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/buger/jsonparser"
@@ -215,12 +216,18 @@ func (e *openAIExtractor) extractSSE(data []byte) []ContentField {
 		}, "choices")
 	}
 
+	keys := make([]int, 0, len(deltas))
+	for k := range deltas {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
 	var fields []ContentField
-	for i := 0; i < len(deltas); i++ {
-		if b, ok := deltas[i]; ok && b.Len() > 0 {
+	for _, k := range keys {
+		if b := deltas[k]; b.Len() > 0 {
 			fields = append(fields, ContentField{
 				Text:  b.String(),
-				Path:  fmt.Sprintf("choices[%d].delta.content", i),
+				Path:  fmt.Sprintf("choices[%d].delta.content", k),
 				Index: len(fields),
 			})
 		}
@@ -293,12 +300,18 @@ func (e *anthropicExtractor) extractSSE(data []byte) []ContentField {
 		b.WriteString(deltaText)
 	}
 
+	keys := make([]int, 0, len(deltas))
+	for k := range deltas {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+
 	var fields []ContentField
-	for i := 0; i < len(deltas); i++ {
-		if b, ok := deltas[i]; ok && b.Len() > 0 {
+	for _, k := range keys {
+		if b := deltas[k]; b.Len() > 0 {
 			fields = append(fields, ContentField{
 				Text:  b.String(),
-				Path:  fmt.Sprintf("content_block[%d].text", i),
+				Path:  fmt.Sprintf("content_block[%d].text", k),
 				Index: len(fields),
 			})
 		}

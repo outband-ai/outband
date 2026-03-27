@@ -44,7 +44,7 @@ func collectTelemetry(t *testing.T, blocks []*auditBlock, apiType apiType) []*te
 	}()
 
 	wkStats := &workerStats{}
-	waitWorkers := startWorkers(2, workerInput, resultsChannel, wkStats)
+	waitWorkers := startWorkers(2, workerInput, resultsChannel, testChain(), wkStats)
 
 	var mu sync.Mutex
 	var collected []*telemetryLog

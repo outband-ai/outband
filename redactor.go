@@ -16,6 +16,7 @@ package main
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -31,6 +32,61 @@ const (
 	piiIPv4  piiCategory = "IP_ADDRESS"
 )
 
+// ---------------------------------------------------------------------------
+// Redactor interface and chain
+// ---------------------------------------------------------------------------
+
+// Redactor processes a string and returns the redacted version along with
+// any PII categories detected. Implementations must be safe for concurrent use.
+type Redactor interface {
+	Redact(input string) (string, []piiCategory)
+	Name() string
+}
+
+// RedactorChain runs an ordered slice of Redactor implementations
+// sequentially. Each redactor operates on the output of the previous one,
+// so earlier redactors' markers are already in place when later redactors
+// see the text.
+type RedactorChain struct {
+	redactors []Redactor
+}
+
+// Redact runs every redactor in order, deduplicating PII categories across
+// all redactors before returning.
+func (c *RedactorChain) Redact(input string) (string, []piiCategory) {
+	text := input
+	catSet := make(map[piiCategory]struct{})
+
+	for _, r := range c.redactors {
+		var cats []piiCategory
+		text, cats = r.Redact(text)
+		for _, cat := range cats {
+			catSet[cat] = struct{}{}
+		}
+	}
+
+	cats := make([]piiCategory, 0, len(catSet))
+	for cat := range catSet {
+		cats = append(cats, cat)
+	}
+	sortCategories(cats)
+	return text, cats
+}
+
+// Name concatenates all registered redactor names, separated by ", ".
+// This value is written directly into telemetryLog.RedactionLevel.
+func (c *RedactorChain) Name() string {
+	names := make([]string, len(c.redactors))
+	for i, r := range c.redactors {
+		names[i] = r.Name()
+	}
+	return strings.Join(names, ", ")
+}
+
+// ---------------------------------------------------------------------------
+// RegexRedactor — the open-source, pattern-based redactor
+// ---------------------------------------------------------------------------
+
 // piiPattern holds a compiled regex and its metadata for one PII type.
 type piiPattern struct {
 	re       *regexp.Regexp
@@ -40,10 +96,10 @@ type piiPattern struct {
 }
 
 // Compiled patterns — initialized once, read-only, safe for concurrent use.
-var piiPatterns []piiPattern
+var defaultPIIPatterns []piiPattern
 
 func init() {
-	piiPatterns = []piiPattern{
+	defaultPIIPatterns = []piiPattern{
 		// Email (most specific format — process first).
 		{
 			re:       regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`),
@@ -90,26 +146,26 @@ func init() {
 	}
 }
 
-// redactionMarker builds the replacement string, e.g. "[REDACTED:SSN:CC6.1]".
-func redactionMarker(cat piiCategory, tag string) string {
-	return fmt.Sprintf("[REDACTED:%s:%s]", cat, tag)
+// RegexRedactor catches structured PII (SSNs, credit cards, emails, phones,
+// IPs) using pre-compiled regular expressions. It is stateless and safe for
+// concurrent use.
+type RegexRedactor struct {
+	patterns []piiPattern
 }
 
-// redactResult holds the output of a redaction pass.
-type redactResult struct {
-	text       string
-	categories []piiCategory // deduplicated categories found
+// NewRegexRedactor returns a RegexRedactor configured with the default MVP
+// patterns.
+func NewRegexRedactor() *RegexRedactor {
+	return &RegexRedactor{patterns: defaultPIIPatterns}
 }
 
-// redactText applies all PII patterns to a string, replacing matches with
-// tagged redaction markers. Patterns are applied sequentially; earlier
-// markers will not accidentally match later patterns because markers contain
-// no digits, @, or dots in PII-triggering positions.
-func redactText(input string) redactResult {
+// Redact applies all PII patterns to the input string, replacing matches
+// with tagged redaction markers.
+func (r *RegexRedactor) Redact(input string) (string, []piiCategory) {
 	catSet := make(map[piiCategory]struct{})
 	result := input
 
-	for _, p := range piiPatterns {
+	for _, p := range r.patterns {
 		pat := p // capture for closure
 		result = pat.re.ReplaceAllStringFunc(result, func(match string) string {
 			if pat.validate != nil && !pat.validate(match) {
@@ -124,7 +180,22 @@ func redactText(input string) redactResult {
 	for c := range catSet {
 		cats = append(cats, c)
 	}
-	return redactResult{text: result, categories: cats}
+	sortCategories(cats)
+	return result, cats
+}
+
+// Name returns the identifier for this redactor.
+func (r *RegexRedactor) Name() string { return "pattern-based" }
+
+// redactionMarker builds the replacement string, e.g. "[REDACTED:SSN:CC6.1]".
+func redactionMarker(cat piiCategory, tag string) string {
+	return fmt.Sprintf("[REDACTED:%s:%s]", cat, tag)
+}
+
+// sortCategories sorts a slice of piiCategory alphabetically for
+// deterministic output in telemetry logs.
+func sortCategories(cats []piiCategory) {
+	sort.Slice(cats, func(i, j int) bool { return cats[i] < cats[j] })
 }
 
 // ---------------------------------------------------------------------------

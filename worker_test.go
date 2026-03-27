@@ -31,7 +31,7 @@ func TestProcessPayloadWithPII(t *testing.T) {
 		apiType:  apiTypeOpenAI,
 	}
 
-	entry := processPayload(payload)
+	entry := processPayload(payload, testChain())
 
 	if entry.RequestID != 42 {
 		t.Errorf("RequestID = %d, want 42", entry.RequestID)
@@ -89,7 +89,7 @@ func TestProcessPayloadNoPII(t *testing.T) {
 		apiType:  apiTypeOpenAI,
 	}
 
-	entry := processPayload(payload)
+	entry := processPayload(payload, testChain())
 
 	if strings.Contains(entry.RedactedPayload, "REDACTED") {
 		t.Errorf("clean payload was redacted: %s", entry.RedactedPayload)
@@ -107,7 +107,7 @@ func TestProcessPayloadUnknownAPI(t *testing.T) {
 		apiType:   apiTypeUnknown,
 	}
 
-	entry := processPayload(payload)
+	entry := processPayload(payload, testChain())
 
 	if entry.FieldsScanned != 0 {
 		t.Errorf("FieldsScanned = %d, want 0 (no extractor)", entry.FieldsScanned)
@@ -125,7 +125,7 @@ func TestProcessPayloadIncomplete(t *testing.T) {
 		apiType:   apiTypeOpenAI,
 	}
 
-	entry := processPayload(payload)
+	entry := processPayload(payload, testChain())
 
 	if entry.CaptureComplete {
 		t.Error("CaptureComplete should be false")
@@ -167,7 +167,7 @@ func TestWorkerPoolThroughput(t *testing.T) {
 	output := make(chan *telemetryLog, 100)
 	stats := &workerStats{}
 
-	wait := startWorkers(4, input, output, stats)
+	wait := startWorkers(4, input, output, testChain(), stats)
 
 	n := 50
 	for i := range n {
@@ -196,7 +196,7 @@ func TestWorkerPoolShutdown(t *testing.T) {
 	output := make(chan *telemetryLog, 16)
 	stats := &workerStats{}
 
-	wait := startWorkers(2, input, output, stats)
+	wait := startWorkers(2, input, output, testChain(), stats)
 
 	close(input)
 	done := make(chan struct{})
@@ -217,7 +217,7 @@ func TestWorkerNonBlockingOutput(t *testing.T) {
 	output := make(chan *telemetryLog, 1) // very small buffer
 	stats := &workerStats{}
 
-	wait := startWorkers(1, input, output, stats)
+	wait := startWorkers(1, input, output, testChain(), stats)
 
 	// Send more payloads than the output buffer can hold.
 	for i := range 5 {

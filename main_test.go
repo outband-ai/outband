@@ -1003,3 +1003,75 @@ func BenchmarkAuditGCImpact(b *testing.B) {
 		logGCDelta(b, "audit-enabled", before, after, b.N)
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Flag validation tests
+// ---------------------------------------------------------------------------
+
+func TestValidateFlagsAllDefaults(t *testing.T) {
+	errs := validateFlags(
+		defaultPoolCapacity, defaultBlockSize, defaultQueueSize,
+		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
+		defaultCollectorQueueSize, defaultBatchSize,
+		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+	)
+	if len(errs) != 0 {
+		t.Errorf("default flags produced errors: %v", errs)
+	}
+}
+
+func TestValidateFlagsNegativeValues(t *testing.T) {
+	errs := validateFlags(
+		-1, -1, -1,
+		-1, -1, -1,
+		-1, -1,
+		-1*time.Second, -1*time.Second, -1*time.Second,
+	)
+	// All 11 checks should fail (audit-capacity -1 is < 0, everything else is <= 0).
+	if len(errs) < 10 {
+		t.Errorf("expected many errors for all-negative, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateFlagsZeroDuration(t *testing.T) {
+	errs := validateFlags(
+		defaultPoolCapacity, defaultBlockSize, defaultQueueSize,
+		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
+		defaultCollectorQueueSize, defaultBatchSize,
+		0, defaultStaleTimeout, defaultFlushInterval,
+	)
+	if len(errs) != 1 {
+		t.Errorf("expected 1 error for zero drop-poll-interval, got %d: %v", len(errs), errs)
+	}
+}
+
+func TestValidateFlagsBlockSizeExceedsCapacity(t *testing.T) {
+	errs := validateFlags(
+		1024, 2048, defaultQueueSize, // block > capacity
+		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
+		defaultCollectorQueueSize, defaultBatchSize,
+		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+	)
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "audit-block-size must be <= --audit-capacity") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected block > capacity error, got: %v", errs)
+	}
+}
+
+func TestValidateFlagsAuditDisabled(t *testing.T) {
+	// audit-capacity=0 disables audit — should be valid.
+	errs := validateFlags(
+		0, defaultBlockSize, defaultQueueSize,
+		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
+		defaultCollectorQueueSize, defaultBatchSize,
+		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+	)
+	if len(errs) != 0 {
+		t.Errorf("audit-capacity=0 should be valid, got: %v", errs)
+	}
+}

@@ -64,6 +64,30 @@ Override via environment: `MOCK_DELAY=500ms docker compose up`
 |---|---|---|
 | `--target` | (required) | Upstream API URL |
 | `--listen` | `localhost:8080` | Address to listen on |
+| `--version` | | Print version and exit |
+| `--api-format` | (auto-detect) | API format: `openai`, `anthropic` |
+| `--audit-capacity` | `52428800` (50MB) | Audit buffer pool size (0 to disable) |
+| `--audit-block-size` | `65536` (64KB) | Audit buffer block size |
+| `--audit-queue-size` | `256` | Audit queue slot count |
+| `--max-payload-size` | `10485760` (10MB) | Per-request payload size limit |
+| `--stale-timeout` | `30s` | Staleness timeout for incomplete payloads |
+| `--workers` | `GOMAXPROCS` | Redaction worker goroutines |
+| `--worker-queue-size` | `64` | Assembler → worker channel buffer |
+| `--collector-queue-size` | `128` | Worker → collector channel buffer |
+| `--batch-size` | `1000` | Collector batch size before flush |
+| `--flush-interval` | `5s` | Collector flush interval |
+| `--drop-poll-interval` | `5s` | Drop counter polling interval |
+
+All numeric and duration flags are validated at startup. Invalid values (zero durations, negative sizes) produce clear error messages and a non-zero exit code.
+
+## Health Probes
+
+| Endpoint | Purpose | 200 when |
+|---|---|---|
+| `GET /healthz` | Liveness probe | Proxy is listening and can TCP-dial the upstream target |
+| `GET /readyz` | Readiness probe | Audit pipeline (ring buffer, workers, collector) is initialized |
+
+If audit is disabled (`--audit-capacity=0`), `/readyz` returns 200 immediately.
 
 ## What Gets Proxied
 
@@ -187,17 +211,42 @@ A future `"nlp-based"` redaction level will address unstructured PII categories.
 - SSE auto-detection: stdlib flushes immediately for `text/event-stream` and chunked responses
 - Audit pipeline: TeeReader → ring buffer → session assembler → worker pool (extract + redact + hash) → double-buffered collector
 
+## Versioning
+
+Build version is injected at compile time via ldflags:
+
+```bash
+go build -ldflags "-X main.version=v1.2.3" -o outband .
+```
+
+The Docker build accepts a `VERSION` build arg:
+
+```bash
+docker build --build-arg VERSION=v1.2.3 --target proxy -t outband:v1.2.3 .
+```
+
+Check the running version:
+
+```bash
+./outband --version
+```
+
+Every telemetry log entry includes a `version` field so auditors can trace which sidecar version generated each record. Entries from different versions are forward-compatible.
+
+### Upgrade Process
+
+1. Pull the new image: `docker pull outband:v1.1.0`
+2. Restart the container (or update the K8s deployment image tag)
+3. Verify with `/healthz` — returns 200 once the proxy is listening and upstream is reachable
+4. Verify with `/readyz` — returns 200 once the audit pipeline is initialized
+5. Confirm telemetry entries show the new `version` field
+
 ## Tests
 
 ```bash
 go test -v            # functional tests
 go test -bench=. -v   # benchmarks
 ```
-
-7 functional tests cover:
-- Header transparency (no User-Agent leak, no X-Forwarded injection, auth preservation, hop-by-hop suppression)
-- Protocol fidelity (SSE boundary preservation, 50MB streaming upload, query string verbatim)
-- Lifecycle (upstream timeout, mid-stream disconnect propagation, error passthrough)
 
 ## License
 

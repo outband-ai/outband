@@ -30,10 +30,11 @@ const (
 )
 
 const (
-	defaultMaxPayloadSize = 10 * 1024 * 1024 // 10MB per request
-	defaultStaleTimeout   = 30 * time.Second
-	defaultWorkerQueueSize = 64
-	staleSweepInterval    = 5 * time.Second
+	defaultMaxPayloadSize   = 10 * 1024 * 1024 // 10MB per request
+	defaultStaleTimeout     = 30 * time.Second
+	defaultWorkerQueueSize  = 64
+	defaultSweepInterval    = 5 * time.Second
+	defaultInflightBudget   = 256 * 1024 * 1024 // 256MB total inflight reassembly memory
 )
 
 // payloadBuffer accumulates blocks for a single in-flight request.
@@ -54,7 +55,9 @@ type assembledPayload struct {
 // assemblerConfig holds tuning parameters for the session assembler.
 type assemblerConfig struct {
 	maxPayloadSize int
+	inflightBudget int           // max total bytes across all in-flight reassembly buffers
 	staleTimeout   time.Duration
+	sweepInterval  time.Duration // how often to check for stale buffers
 	workerInput    chan<- *assembledPayload
 	pool           blockAllocator
 	apiType        apiType
@@ -64,6 +67,8 @@ type assemblerConfig struct {
 type assemblerStats struct {
 	oversizedDropped atomic.Int64
 	staleDropped     atomic.Int64
+	workerQueueFull  atomic.Int64
+	budgetExceeded   atomic.Int64
 }
 
 // startAssembler runs the session assembler goroutine. It reads blocks from
@@ -76,8 +81,18 @@ type assemblerStats struct {
 func startAssembler(auditQueue <-chan *auditBlock, cfg assemblerConfig, stats *assemblerStats) {
 	defer close(cfg.workerInput)
 
+	sweep := cfg.sweepInterval
+	if sweep <= 0 {
+		sweep = defaultSweepInterval
+	}
+	budget := cfg.inflightBudget
+	if budget <= 0 {
+		budget = defaultInflightBudget
+	}
+
 	inflight := make(map[uint64]*payloadBuffer)
-	ticker := time.NewTicker(staleSweepInterval)
+	inflightBytes := 0
+	ticker := time.NewTicker(sweep)
 	defer ticker.Stop()
 
 	for {
@@ -90,27 +105,37 @@ func startAssembler(auditQueue <-chan *auditBlock, cfg assemblerConfig, stats *a
 				}
 				return
 			}
-			processBlock(blk, inflight, cfg, stats)
+			inflightBytes = processBlock(blk, inflight, inflightBytes, budget, cfg, stats)
 
 		case <-ticker.C:
-			sweepStale(inflight, cfg.staleTimeout, stats)
+			inflightBytes = sweepStale(inflight, inflightBytes, cfg.staleTimeout, stats)
 		}
 	}
 }
 
 // processBlock handles a single auditBlock arriving from the queue.
-func processBlock(blk *auditBlock, inflight map[uint64]*payloadBuffer, cfg assemblerConfig, stats *assemblerStats) {
+// Returns the updated inflightBytes count.
+func processBlock(blk *auditBlock, inflight map[uint64]*payloadBuffer, inflightBytes, budget int, cfg assemblerConfig, stats *assemblerStats) int {
 	rid := blk.requestID
 
 	// Abort: discard any partial buffer for this request.
 	if blk.abort {
-		delete(inflight, rid)
+		if buf, ok := inflight[rid]; ok {
+			inflightBytes -= len(buf.data)
+			delete(inflight, rid)
+		}
 		cfg.pool.put(blk)
-		return
+		return inflightBytes
 	}
 
 	buf, exists := inflight[rid]
 	if !exists {
+		// Check global inflight budget before accepting a new request.
+		if inflightBytes+blk.n > budget {
+			cfg.pool.put(blk)
+			stats.budgetExceeded.Add(1)
+			return inflightBytes
+		}
 		buf = &payloadBuffer{
 			lastSeen: time.Now(),
 		}
@@ -119,27 +144,41 @@ func processBlock(blk *auditBlock, inflight map[uint64]*payloadBuffer, cfg assem
 
 	// Sequence check: if out of order, treat as corrupt and drop.
 	if blk.seq != buf.nextSeq {
+		inflightBytes -= len(buf.data)
 		delete(inflight, rid)
 		cfg.pool.put(blk)
-		return
+		return inflightBytes
 	}
 
+	oldLen := len(buf.data)
 	buf.data = append(buf.data, blk.data[:blk.n]...)
+	inflightBytes += len(buf.data) - oldLen
 	buf.nextSeq++
 	buf.lastSeen = time.Now()
 
-	// Size limit enforcement.
+	// Per-request size limit enforcement.
 	if len(buf.data) > cfg.maxPayloadSize {
+		inflightBytes -= len(buf.data)
 		delete(inflight, rid)
 		cfg.pool.put(blk)
 		stats.oversizedDropped.Add(1)
-		return
+		return inflightBytes
+	}
+
+	// Global inflight budget enforcement (after append).
+	if inflightBytes > budget {
+		inflightBytes -= len(buf.data)
+		delete(inflight, rid)
+		cfg.pool.put(blk)
+		stats.budgetExceeded.Add(1)
+		return inflightBytes
 	}
 
 	isFinal := blk.final
 	cfg.pool.put(blk)
 
 	if isFinal {
+		inflightBytes -= len(buf.data)
 		payload := &assembledPayload{
 			requestID: rid,
 			data:      buf.data,
@@ -150,20 +189,26 @@ func processBlock(blk *auditBlock, inflight map[uint64]*payloadBuffer, cfg assem
 		select {
 		case cfg.workerInput <- payload:
 		default:
+			stats.workerQueueFull.Add(1)
 		}
 		delete(inflight, rid)
 	}
+
+	return inflightBytes
 }
 
 // sweepStale evicts payloads that haven't received a block within the timeout.
-func sweepStale(inflight map[uint64]*payloadBuffer, timeout time.Duration, stats *assemblerStats) {
+// Returns the updated inflightBytes count.
+func sweepStale(inflight map[uint64]*payloadBuffer, inflightBytes int, timeout time.Duration, stats *assemblerStats) int {
 	now := time.Now()
 	for id, buf := range inflight {
 		if now.Sub(buf.lastSeen) > timeout {
+			inflightBytes -= len(buf.data)
 			delete(inflight, id)
 			stats.staleDropped.Add(1)
 		}
 	}
+	return inflightBytes
 }
 
 // detectAPIType infers the upstream API provider from the target URL hostname.

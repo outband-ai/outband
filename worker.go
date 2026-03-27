@@ -24,16 +24,17 @@ import (
 
 // telemetryLog is the output record from the processing pipeline.
 type telemetryLog struct {
-	RequestID          uint64   `json:"request_id"`
+	RequestID          uint64    `json:"request_id"`
 	Timestamp          time.Time `json:"timestamp"`
-	OriginalHash       string   `json:"original_hash"`
-	RedactedPayload    string   `json:"redacted_payload"`
-	RedactedHash       string   `json:"redacted_hash"`
-	RedactionLevel     string   `json:"redaction_level"`
-	PIICategoriesFound []string `json:"pii_categories_found"`
-	ExtractorUsed      string   `json:"extractor_used"`
-	FieldsScanned      int      `json:"fields_scanned"`
-	CaptureComplete    bool     `json:"capture_complete"`
+	Version            string    `json:"version"`
+	OriginalHash       string    `json:"original_hash"`
+	RedactedPayload    string    `json:"redacted_payload"`
+	RedactedHash       string    `json:"redacted_hash"`
+	RedactionLevel     string    `json:"redaction_level"`
+	PIICategoriesFound []string  `json:"pii_categories_found"`
+	ExtractorUsed      string    `json:"extractor_used"`
+	FieldsScanned      int       `json:"fields_scanned"`
+	CaptureComplete    bool      `json:"capture_complete"`
 }
 
 // workerStats exposes atomic counters for observability.
@@ -42,16 +43,17 @@ type workerStats struct {
 }
 
 // startWorkers launches numWorkers goroutines that process assembled payloads.
-// Workers exit when input is closed. Returns a function that blocks until
-// all workers have exited.
-func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- *telemetryLog, stats *workerStats) (wait func()) {
+// The RedactorChain is shared across all workers (it is stateless and safe
+// for concurrent use). Workers exit when input is closed. Returns a function
+// that blocks until all workers have exited.
+func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- *telemetryLog, chain *RedactorChain, stats *workerStats) (wait func()) {
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			for payload := range input {
-				entry := processPayload(payload)
+				entry := processPayload(payload, chain)
 				// Non-blocking send: if output is full, drop the entry.
 				select {
 				case output <- entry:
@@ -65,9 +67,9 @@ func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- 
 }
 
 // processPayload is the core per-request processing function.
-// It extracts content fields, redacts PII, computes hashes, and builds
-// the telemetry log entry.
-func processPayload(p *assembledPayload) *telemetryLog {
+// It extracts content fields, redacts PII via the chain, computes hashes,
+// and builds the telemetry log entry.
+func processPayload(p *assembledPayload, chain *RedactorChain) *telemetryLog {
 	now := time.Now()
 	originalHash := hashPayload(p.data)
 
@@ -80,19 +82,19 @@ func processPayload(p *assembledPayload) *telemetryLog {
 	var allCategories []piiCategory
 	var redactedFields []ContentField
 	for _, f := range fields {
-		r := redactText(f.Text)
+		text, cats := chain.Redact(f.Text)
 		redactedFields = append(redactedFields, ContentField{
-			Text:  r.text,
+			Text:  text,
 			Path:  f.Path,
 			Index: f.Index,
 		})
-		allCategories = append(allCategories, r.categories...)
+		allCategories = append(allCategories, cats...)
 	}
 
 	redactedPayload := buildRedactedPayload(redactedFields)
 	redactedHash := hashRedacted(redactedPayload, now)
 
-	// Deduplicate categories.
+	// Deduplicate categories across all fields.
 	catSet := make(map[piiCategory]struct{})
 	for _, c := range allCategories {
 		catSet[c] = struct{}{}
@@ -105,10 +107,11 @@ func processPayload(p *assembledPayload) *telemetryLog {
 	return &telemetryLog{
 		RequestID:          p.requestID,
 		Timestamp:          now,
+		Version:            version,
 		OriginalHash:       originalHash,
 		RedactedPayload:    redactedPayload,
 		RedactedHash:       redactedHash,
-		RedactionLevel:     "pattern-based",
+		RedactionLevel:     chain.Name(),
 		PIICategoriesFound: cats,
 		ExtractorUsed:      extractorName(p.apiType),
 		FieldsScanned:      len(fields),
@@ -144,4 +147,3 @@ func buildRedactedPayload(fields []ContentField) string {
 	b, _ := json.Marshal(m)
 	return string(b)
 }
-
