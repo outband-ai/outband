@@ -15,7 +15,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -26,10 +25,13 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 type bufferPool struct {
@@ -48,11 +50,12 @@ func (b *bufferPool) Put(buf []byte) {
 }
 
 type proxyConfig struct {
-	targetURL  *url.URL
-	auditPool  blockAllocator    // nil = audit disabled
-	auditQueue chan<- *auditBlock // global audit queue
-	drops      dropRecorder      // nil = no drop tracking
-	nextReqID  *atomic.Uint64    // monotonic request ID generator
+	targetURL      *url.URL
+	auditPool      blockAllocator        // nil = audit disabled
+	auditQueue     chan<- *auditBlock     // global audit queue
+	drops          dropRecorder          // nil = no drop tracking
+	nextReqID      *atomic.Uint64        // monotonic request ID generator
+	recordOverhead func(time.Duration)   // nil = latency recording disabled
 }
 
 func newProxy(cfg proxyConfig) *httputil.ReverseProxy {
@@ -86,6 +89,14 @@ func newProxy(cfg proxyConfig) *httputil.ReverseProxy {
 				reqID := cfg.nextReqID.Add(1)
 				r.Out.Body = newAuditReader(r.Out.Body, cfg.auditPool, cfg.drops, cfg.auditQueue, reqID)
 			}
+			// Record proxy ingress overhead: time from request arrival to
+			// upstream dial initiation. This is the last code before
+			// http.Transport dials. Does NOT measure SSE stream duration.
+			if cfg.recordOverhead != nil {
+				if start, ok := requestStart(r.In.Context()); ok {
+					cfg.recordOverhead(time.Since(start))
+				}
+			}
 		},
 		Transport:  transport,
 		BufferPool: &bufferPool{},
@@ -104,6 +115,8 @@ func validateFlags(
 	maxPayloadSize, workerQueueSize, numWorkers int,
 	collectorQueueSize, batchSize int,
 	dropPollInterval, staleTimeout, flushInterval time.Duration,
+	logMaxSize int64, logMaxFiles int, logMaxAge, summaryInterval, shutdownDrain time.Duration,
+	metricsPort int,
 ) []string {
 	var errs []string
 	if auditCapacity < 0 {
@@ -142,7 +155,40 @@ func validateFlags(
 	if auditCapacity > 0 && auditBlockSize > 0 && auditBlockSize > auditCapacity {
 		errs = append(errs, "--audit-block-size must be <= --audit-capacity")
 	}
+	if logMaxSize <= 0 {
+		errs = append(errs, "--log-max-size must be > 0")
+	}
+	if logMaxFiles <= 0 {
+		errs = append(errs, "--log-max-files must be > 0")
+	}
+	if logMaxAge <= 0 {
+		errs = append(errs, "--log-max-age must be > 0")
+	}
+	if summaryInterval <= 0 {
+		errs = append(errs, "--summary-interval must be > 0")
+	}
+	if shutdownDrain <= 0 {
+		errs = append(errs, "--shutdown-drain must be > 0")
+	}
+	if metricsPort < 1 || metricsPort > 65535 {
+		errs = append(errs, "--metrics-port must be between 1 and 65535")
+	}
 	return errs
+}
+
+// parseWebhookHeaders parses comma-separated key=value pairs into a map.
+func parseWebhookHeaders(s string) map[string]string {
+	headers := make(map[string]string)
+	if s == "" {
+		return headers
+	}
+	for _, pair := range strings.Split(s, ",") {
+		parts := strings.SplitN(strings.TrimSpace(pair), "=", 2)
+		if len(parts) == 2 {
+			headers[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+		}
+	}
+	return headers
 }
 
 func main() {
@@ -161,6 +207,19 @@ func main() {
 	batchSize := flag.Int("batch-size", defaultBatchSize, "collector batch size before flush")
 	flushInterval := flag.Duration("flush-interval", defaultFlushInterval, "collector flush interval")
 	showVersion := flag.Bool("version", false, "print version and exit")
+
+	// Evidence pipeline flags.
+	logDir := flag.String("log-dir", ".", "directory for JSONL telemetry logs")
+	logMaxSize := flag.Int64("log-max-size", 100*1024*1024, "max JSONL file size in bytes before rotation")
+	logMaxAge := flag.Duration("log-max-age", 1*time.Hour, "max JSONL file age before rotation")
+	logMaxFiles := flag.Int("log-max-files", 24, "max rotated JSONL files to retain")
+	evidenceDir := flag.String("evidence-dir", ".", "directory for JSON evidence summaries")
+	summaryInterval := flag.Duration("summary-interval", 60*time.Minute, "interval between evidence summary reports")
+	webhookURL := flag.String("webhook-url", "", "URL for evidence summary webhook delivery")
+	webhookHeaders := flag.String("webhook-headers", "", "comma-separated key=value headers for webhook")
+	metricsPort := flag.Int("metrics-port", 9090, "port for Prometheus metrics server")
+	shutdownDrain := flag.Duration("shutdown-drain", 10*time.Second, "HTTP connection drain budget during shutdown")
+
 	flag.Parse()
 
 	if *showVersion {
@@ -193,6 +252,8 @@ func main() {
 		*maxPayloadSize, *workerQueueSize, *numWorkers,
 		*collectorQueueSize, *batchSize,
 		*dropPollInterval, *staleTimeout, *flushInterval,
+		*logMaxSize, *logMaxFiles, *logMaxAge, *summaryInterval, *shutdownDrain,
+		*metricsPort,
 	); len(errs) > 0 {
 		for _, e := range errs {
 			fmt.Fprintln(os.Stderr, "error:", e)
@@ -206,14 +267,42 @@ func main() {
 	var auditQueue chan *auditBlock
 	var stopPoller func()
 	var waitPipeline func()
+	var tickerCancel context.CancelFunc
+	var tickerDone chan struct{}
+	var jsonlWriter *JSONLWriter
+	var metricsServer *http.Server
+	var metrics *outbandMetrics
+	var aggregator *Aggregator
+	var drops *dropCounter
+	var ioErrors atomic.Uint64
+	var lastDropsReported int64
+	var lastIOErrsReported uint64
+
 	if *auditCapacity > 0 {
 		pool := newBlockPool(*auditCapacity, *auditBlockSize)
 		auditQueue = make(chan *auditBlock, *auditQueueSize)
-		drops := newDropCounter()
+		drops = newDropCounter()
 		cfg.auditPool = pool
 		cfg.auditQueue = auditQueue
 		cfg.drops = drops
 		cfg.nextReqID = &atomic.Uint64{}
+
+		// Prometheus metrics.
+		promRegistry := prometheus.NewRegistry()
+		metrics = newMetrics(promRegistry, drops)
+		metricsAddr := fmt.Sprintf(":%d", *metricsPort)
+		metricsServer = startMetricsServer(metricsAddr, promRegistry)
+
+		// Aggregator.
+		chain := &RedactorChain{redactors: []Redactor{NewRegexRedactor()}}
+		aggregator = NewAggregator(chain.Name())
+
+		// JSONL writer.
+		var writerErr error
+		jsonlWriter, writerErr = NewJSONLWriter(*logDir, *logMaxSize, *logMaxAge, *logMaxFiles)
+		if writerErr != nil {
+			log.Fatalf("failed to initialize JSONL writer: %v", writerErr)
+		}
 
 		// Determine API type: explicit flag overrides URL heuristic.
 		apiT := parseAPIFormat(*apiFormat)
@@ -240,14 +329,12 @@ func main() {
 		}()
 
 		// Stage 2: Workers.
-		chain := &RedactorChain{redactors: []Redactor{NewRegexRedactor()}}
 		var wkStats workerStats
 		waitWorkers := startWorkers(*numWorkers, workerInput, resultsChannel, chain, &wkStats)
 
-		// Stage 3: Collector.
+		// Stage 3: Collector with composite flushFunc.
 		var cStats collectorStats
 		collectorDone := make(chan struct{})
-		logger := log.Default()
 		go func() {
 			defer close(collectorDone)
 			startCollector(collectorConfig{
@@ -255,9 +342,17 @@ func main() {
 				flushInterval: *flushInterval,
 				input:         resultsChannel,
 				flush: func(batch []*telemetryLog) {
+					if err := jsonlWriter.Flush(batch); err != nil {
+						log.Printf("JSONL write error: %v", err)
+						ioErrors.Add(1)
+						metrics.flushErrors.Inc()
+					}
+					aggregator.Ingest(batch)
+					metrics.requestsAudited.Add(float64(len(batch)))
 					for _, entry := range batch {
-						data, _ := json.Marshal(entry)
-						logger.Printf("TELEMETRY: %s", data)
+						for _, cat := range entry.PIICategoriesFound {
+							metrics.piiDetected.WithLabelValues(cat).Inc()
+						}
 					}
 				},
 			}, &cStats)
@@ -275,17 +370,68 @@ func main() {
 				wkStats.resultDropped.Load(), cStats.flushBacklog.Load())
 		}
 
+		// Egress dispatcher.
+		logger := log.Default()
+		var egressTargets []EgressTarget
+		egressTargets = append(egressTargets, NewLocalJSONTarget(*evidenceDir))
+		if _, ok := GetTarget("pdf"); !ok {
+			logger.Println("PDF evidence reports require outband-enterprise. See outband.dev/pricing.")
+		}
+		if *webhookURL != "" {
+			hdrs := parseWebhookHeaders(*webhookHeaders)
+			egressTargets = append(egressTargets, NewWebhookTarget(*webhookURL, hdrs))
+		}
+		dispatcher := NewEgressDispatcher(logger, egressTargets...)
+
+		// Evidence ticker goroutine.
+		var tickerCtx context.Context
+		tickerCtx, tickerCancel = context.WithCancel(context.Background())
+		tickerDone = make(chan struct{})
+		go func() {
+			defer close(tickerDone)
+			tick := time.NewTicker(*summaryInterval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-tick.C:
+					if tickerCtx.Err() != nil {
+						return
+					}
+					currentDrops := drops.total.Load()
+					currentIOErrs := ioErrors.Load()
+					windowDrops := uint64(currentDrops - lastDropsReported)
+					windowIOErrs := currentIOErrs - lastIOErrsReported
+					lastDropsReported = currentDrops
+					lastIOErrsReported = currentIOErrs
+					summary := aggregator.SnapshotAndReset(windowIOErrs, windowDrops, false, version)
+					if err := dispatcher.Dispatch(tickerCtx, summary); err != nil {
+						log.Printf("egress dispatch error: %v", err)
+					}
+					metrics.evidenceReports.Inc()
+				case <-tickerCtx.Done():
+					return
+				}
+			}
+		}()
+
+		// Wire latency recording into proxy config.
+		cfg.recordOverhead = func(d time.Duration) {
+			aggregator.RecordProcessed(d)
+			metrics.proxyOverhead.Observe(d.Seconds())
+			metrics.requestsTotal.Inc()
+		}
+
 		stopPoller = startDropPoller(context.Background(), drops, *dropPollInterval, log.Default())
 		ready.Store(true)
-		log.Printf("audit pipeline enabled: pool=%dMB, block=%dKB, queue=%d, workers=%d",
-			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize, *numWorkers)
+		log.Printf("audit pipeline enabled: pool=%dMB, block=%dKB, queue=%d, workers=%d, metrics=:%d",
+			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize, *numWorkers, *metricsPort)
 	} else {
 		// No audit pipeline — ready immediately.
 		ready.Store(true)
 	}
 
 	proxy := newProxy(cfg)
-	handler := newHealthHandler(proxy, targetURL, &ready)
+	handler := newLatencyMiddleware(newHealthHandler(proxy, targetURL, &ready))
 
 	server := &http.Server{
 		Addr:    *listen,
@@ -303,26 +449,69 @@ func main() {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	<-sig
 
+	// --- Time-budgeted, panic-safe shutdown ---
+
 	log.Println("shutting down")
-	ready.Store(false) // reject /readyz immediately so K8s stops routing traffic
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	shutdownErr := server.Shutdown(ctx)
-	if shutdownErr != nil {
-		log.Printf("server shutdown error: %v", shutdownErr)
+
+	// 1. Signal readiness failure to load balancers immediately.
+	ready.Store(false)
+
+	// 2. Budget the network drain — separate context, separate deadline.
+	// server.Shutdown blocks until all active connections finish or context
+	// expires. With 20s SSE streams and a short deadline, K8s sends SIGKILL.
+	httpCtx, httpCancel := context.WithTimeout(context.Background(), *shutdownDrain)
+	defer httpCancel()
+	if err := server.Shutdown(httpCtx); err != nil {
+		log.Printf("network drain timeout: %v", err)
 	}
-	// Always drain the pipeline regardless of Shutdown outcome so the
-	// collector flushes any buffered telemetry before exit.
+
+	// 3. HTTP server is DEAD. No new TeeReaders can be created.
+	// It is now mathematically safe to close the queue without panics.
 	if auditQueue != nil {
 		close(auditQueue)
 	}
+
+	// 4. Budget the internal flush — un-cancellable 5-second deadline.
+	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer flushCancel()
 	if waitPipeline != nil {
-		waitPipeline()
+		waitPipeline() // assembler → workers → collector (final flushFunc call)
+	}
+
+	// 5. Stop the evidence ticker.
+	if tickerCancel != nil {
+		tickerCancel()
+		select {
+		case <-tickerDone:
+		case <-flushCtx.Done():
+			log.Println("warning: ticker drain exceeded budget")
+		}
+	}
+
+	// 6. Final partial evidence report — force immediately, local JSON only.
+	// Compute per-window deltas from the last ticker report.
+	if drops != nil && aggregator != nil {
+		finalDrops := uint64(drops.total.Load() - lastDropsReported)
+		finalIOErrs := ioErrors.Load() - lastIOErrsReported
+		summary := aggregator.SnapshotAndReset(finalIOErrs, finalDrops, true, version)
+		localJSON := NewLocalJSONTarget(*evidenceDir)
+		if err := localJSON.Push(context.Background(), summary); err != nil {
+			log.Printf("CRITICAL: failed to write final evidence summary: %v", err)
+		}
+		if metrics != nil {
+			metrics.evidenceReports.Inc()
+		}
+	}
+
+	// 7. Cleanup remaining resources.
+	if jsonlWriter != nil {
+		jsonlWriter.Close()
+	}
+	if metricsServer != nil {
+		metricsServer.Shutdown(flushCtx)
 	}
 	if stopPoller != nil {
 		stopPoller()
 	}
-	if shutdownErr != nil {
-		os.Exit(1)
-	}
+	log.Println("sidecar termination complete")
 }
