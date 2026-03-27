@@ -78,7 +78,7 @@ func (h *healthHandler) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "not ready", http.StatusServiceUnavailable)
 		return
 	}
-	conn.Close()
+	defer conn.Close()
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok\n"))
