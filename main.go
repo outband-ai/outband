@@ -17,9 +17,55 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"os"
+	"sync"
+	"time"
 )
+
+type bufferPool struct {
+	pool sync.Pool
+}
+
+func (b *bufferPool) Get() []byte {
+	if v := b.pool.Get(); v != nil {
+		return v.([]byte)
+	}
+	return make([]byte, 32*1024)
+}
+
+func (b *bufferPool) Put(buf []byte) {
+	b.pool.Put(buf)
+}
+
+func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
+	transport := &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   30 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          1000,
+		MaxIdleConnsPerHost:   100,
+		IdleConnTimeout:       60 * time.Second,
+		TLSHandshakeTimeout:  10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    true,
+	}
+
+	return &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(targetURL)
+			r.Out.URL.RawQuery = r.In.URL.RawQuery
+		},
+		Transport:  transport,
+		BufferPool: &bufferPool{},
+	}
+}
 
 func main() {
 	target := flag.String("target", "", "upstream API URL (e.g., https://api.openai.com)")
@@ -37,11 +83,19 @@ func main() {
 		log.Fatalf("invalid target URL: %v", err)
 	}
 
-	// Validate scheme
 	if targetURL.Scheme != "http" && targetURL.Scheme != "https" {
 		log.Fatalf("target URL must have http or https scheme, got %q", targetURL.Scheme)
 	}
 
-	_ = listen
-	_ = targetURL
+	proxy := newProxy(targetURL)
+
+	server := &http.Server{
+		Addr:    *listen,
+		Handler: proxy,
+	}
+
+	log.Printf("proxying %s -> %s", *listen, targetURL)
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatal(err)
+	}
 }
