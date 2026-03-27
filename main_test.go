@@ -1008,12 +1008,27 @@ func BenchmarkAuditGCImpact(b *testing.B) {
 // Flag validation tests
 // ---------------------------------------------------------------------------
 
+// validDefaults are the new evidence pipeline flag defaults for validateFlags.
+const (
+	testLogMaxSize = 100 * 1024 * 1024
+	testLogMaxFiles = 24
+	testMetricsPort = 9090
+)
+
+var (
+	testLogMaxAge       = 1 * time.Hour
+	testSummaryInterval = 60 * time.Minute
+	testShutdownDrain   = 10 * time.Second
+)
+
 func TestValidateFlagsAllDefaults(t *testing.T) {
 	errs := validateFlags(
 		defaultPoolCapacity, defaultBlockSize, defaultQueueSize,
 		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
 		defaultCollectorQueueSize, defaultBatchSize,
 		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+		testLogMaxSize, testLogMaxFiles, testLogMaxAge, testSummaryInterval, testShutdownDrain,
+		testMetricsPort,
 	)
 	if len(errs) != 0 {
 		t.Errorf("default flags produced errors: %v", errs)
@@ -1026,13 +1041,13 @@ func TestValidateFlagsNegativeValues(t *testing.T) {
 		-1, -1, -1,
 		-1, -1,
 		-1*time.Second, -1*time.Second, -1*time.Second,
+		-1, -1, -1*time.Second, -1*time.Second, -1*time.Second,
+		0,
 	)
-	// All 11 individual checks fail, plus the block > capacity cross-check (since -1 > -1 is false, it doesn't fire).
-	// Expected: audit-capacity<0, audit-block-size<=0, audit-queue-size<=0, max-payload-size<=0,
-	// worker-queue-size<=0, workers<=0, collector-queue-size<=0, batch-size<=0,
-	// drop-poll-interval<=0, stale-timeout<=0, flush-interval<=0 = 11 errors.
-	if len(errs) != 11 {
-		t.Errorf("expected 11 errors for all-negative, got %d: %v", len(errs), errs)
+	// Original 11 checks + 6 new checks (log-max-size, log-max-files, log-max-age,
+	// summary-interval, shutdown-drain, metrics-port) = 17 errors.
+	if len(errs) != 17 {
+		t.Errorf("expected 17 errors for all-negative, got %d: %v", len(errs), errs)
 	}
 }
 
@@ -1042,6 +1057,8 @@ func TestValidateFlagsZeroDuration(t *testing.T) {
 		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
 		defaultCollectorQueueSize, defaultBatchSize,
 		0, defaultStaleTimeout, defaultFlushInterval,
+		testLogMaxSize, testLogMaxFiles, testLogMaxAge, testSummaryInterval, testShutdownDrain,
+		testMetricsPort,
 	)
 	if len(errs) != 1 {
 		t.Errorf("expected 1 error for zero drop-poll-interval, got %d: %v", len(errs), errs)
@@ -1054,6 +1071,8 @@ func TestValidateFlagsBlockSizeExceedsCapacity(t *testing.T) {
 		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
 		defaultCollectorQueueSize, defaultBatchSize,
 		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+		testLogMaxSize, testLogMaxFiles, testLogMaxAge, testSummaryInterval, testShutdownDrain,
+		testMetricsPort,
 	)
 	found := false
 	for _, e := range errs {
@@ -1073,8 +1092,34 @@ func TestValidateFlagsAuditDisabled(t *testing.T) {
 		defaultMaxPayloadSize, defaultWorkerQueueSize, 4,
 		defaultCollectorQueueSize, defaultBatchSize,
 		defaultDropPollInterval, defaultStaleTimeout, defaultFlushInterval,
+		testLogMaxSize, testLogMaxFiles, testLogMaxAge, testSummaryInterval, testShutdownDrain,
+		testMetricsPort,
 	)
 	if len(errs) != 0 {
 		t.Errorf("audit-capacity=0 should be valid, got: %v", errs)
+	}
+}
+
+func TestParseWebhookHeaders(t *testing.T) {
+	tests := []struct {
+		input string
+		want  map[string]string
+	}{
+		{"", map[string]string{}},
+		{"Authorization=Bearer xyz", map[string]string{"Authorization": "Bearer xyz"}},
+		{"X-A=1,X-B=2", map[string]string{"X-A": "1", "X-B": "2"}},
+		{" X-A = 1 , X-B = 2 ", map[string]string{"X-A": "1", "X-B": "2"}},
+	}
+	for _, tt := range tests {
+		got := parseWebhookHeaders(tt.input)
+		if len(got) != len(tt.want) {
+			t.Errorf("parseWebhookHeaders(%q): got %d entries, want %d", tt.input, len(got), len(tt.want))
+			continue
+		}
+		for k, v := range tt.want {
+			if got[k] != v {
+				t.Errorf("parseWebhookHeaders(%q)[%q]: got %q, want %q", tt.input, k, got[k], v)
+			}
+		}
 	}
 }
