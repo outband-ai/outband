@@ -14,7 +14,9 @@
 package main
 
 import (
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,18 +25,28 @@ import (
 	"testing"
 )
 
-func TestHealthzUpstreamReachable(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer upstream.Close()
+// unreachableURL returns an http URL pointing at a port that is guaranteed
+// to have nothing listening. It binds to :0 to get an OS-assigned port,
+// then immediately closes the listener so the port is free but unused.
+func unreachableURL(t *testing.T) *url.URL {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for ephemeral port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	u, _ := url.Parse(fmt.Sprintf("http://127.0.0.1:%d", port))
+	return u
+}
 
-	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(proxyConfig{targetURL: upstreamURL})
-	ready := &atomic.Bool{}
-	ready.Store(true)
+func TestHealthzAlwaysOK(t *testing.T) {
+	// /healthz is a process-level liveness probe — always 200.
+	unreachable := unreachableURL(t)
+	proxy := newProxy(proxyConfig{targetURL: unreachable})
+	ready := &atomic.Bool{} // not ready, doesn't matter for liveness
 
-	h := newHealthHandler(proxy, upstreamURL, ready)
+	h := newHealthHandler(proxy, unreachable, ready)
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
@@ -47,33 +59,6 @@ func TestHealthzUpstreamReachable(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Fatalf("GET /healthz = %d, want 200; body: %s", resp.StatusCode, body)
-	}
-}
-
-func TestHealthzUpstreamUnreachable(t *testing.T) {
-	// Point at a port where nothing is listening.
-	unreachable, _ := url.Parse("http://127.0.0.1:1")
-	proxy := newProxy(proxyConfig{targetURL: unreachable})
-	ready := &atomic.Bool{}
-	ready.Store(true)
-
-	h := newHealthHandler(proxy, unreachable, ready)
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-
-	resp, err := http.Get(srv.URL + "/healthz")
-	if err != nil {
-		t.Fatalf("GET /healthz: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("GET /healthz = %d, want 503", resp.StatusCode)
-	}
-
-	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "upstream unreachable") {
-		t.Errorf("expected 'upstream unreachable' in body, got: %s", body)
 	}
 }
 
@@ -101,7 +86,7 @@ func TestReadyzReady(t *testing.T) {
 	}
 }
 
-func TestReadyzNotReady(t *testing.T) {
+func TestReadyzNotReadyPipelineUninitialized(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
 	defer upstream.Close()
 
@@ -123,9 +108,37 @@ func TestReadyzNotReady(t *testing.T) {
 		t.Fatalf("GET /readyz = %d, want 503", resp.StatusCode)
 	}
 
+	// Error details must NOT be exposed to clients.
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "pipeline not ready") {
-		t.Errorf("expected 'pipeline not ready' in body, got: %s", body)
+	if strings.Contains(string(body), "pipeline") {
+		t.Errorf("internal details leaked in response body: %s", body)
+	}
+}
+
+func TestReadyzNotReadyUpstreamUnreachable(t *testing.T) {
+	unreachable := unreachableURL(t)
+	proxy := newProxy(proxyConfig{targetURL: unreachable})
+	ready := &atomic.Bool{}
+	ready.Store(true) // pipeline ready, but upstream down
+
+	h := newHealthHandler(proxy, unreachable, ready)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/readyz")
+	if err != nil {
+		t.Fatalf("GET /readyz: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("GET /readyz = %d, want 503", resp.StatusCode)
+	}
+
+	// Must not leak connection error details to clients.
+	body, _ := io.ReadAll(resp.Body)
+	if strings.Contains(string(body), "dial") || strings.Contains(string(body), "connection") {
+		t.Errorf("internal error details leaked in response body: %s", body)
 	}
 }
 
@@ -174,7 +187,6 @@ func TestHealthHandlerProxiesNonHealthPaths(t *testing.T) {
 	srv := httptest.NewServer(h)
 	defer srv.Close()
 
-	// Non-health paths should be forwarded to upstream.
 	resp, err := http.Get(srv.URL + "/v1/chat/completions")
 	if err != nil {
 		t.Fatalf("GET /v1/chat/completions: %v", err)

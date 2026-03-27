@@ -202,7 +202,8 @@ func TestWorkspaceIDNotRedactedE2E(t *testing.T) {
 // collector continues accepting results during an active flush operation.
 func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 	input := make(chan *telemetryLog, 200)
-	gate := make(chan struct{})
+	gate := make(chan struct{})        // blocks the first flush
+	flushStarted := make(chan struct{}) // signals when flush callback begins
 	var mu sync.Mutex
 	var totalFlushed int
 
@@ -215,7 +216,11 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 			flushInterval: 20 * time.Millisecond,
 			input:         input,
 			flush: func(batch []*telemetryLog) {
-				<-gate // first flush blocks
+				select {
+				case flushStarted <- struct{}{}:
+				default:
+				}
+				<-gate // block until test releases
 				mu.Lock()
 				totalFlushed += len(batch)
 				mu.Unlock()
@@ -223,20 +228,25 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 		}, stats)
 	}()
 
-	// Send first batch to trigger blocking flush.
+	// Send first batch to trigger a flush.
 	for i := range 5 {
 		input <- &telemetryLog{RequestID: uint64(i)}
 	}
-	time.Sleep(50 * time.Millisecond)
+
+	// Wait for the flush callback to actually start executing.
+	select {
+	case <-flushStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("flush did not start")
+	}
 
 	// Send more while flush is blocked — these should NOT be dropped.
 	for i := range 20 {
 		input <- &telemetryLog{RequestID: uint64(100 + i)}
 	}
 
-	// Release flush and close.
+	// Release the blocked flush and close input.
 	close(gate)
-	time.Sleep(100 * time.Millisecond)
 	close(input)
 
 	select {

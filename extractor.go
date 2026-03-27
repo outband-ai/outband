@@ -197,22 +197,27 @@ func (e *openAIExtractor) extractSSE(data []byte) []ContentField {
 	deltas := make(map[int]*strings.Builder)
 
 	for _, chunk := range chunks {
-		choiceIdx := 0
+		arrayPos := 0
 		jsonparser.ArrayEach(chunk, func(choice []byte, _ jsonparser.ValueType, _ int, err error) {
 			if err != nil {
-				choiceIdx++
+				arrayPos++
 				return
 			}
-			delta, err := jsonparser.GetString(choice, "delta", "content")
-			if err == nil && delta != "" {
-				b, ok := deltas[choiceIdx]
+			// Use the explicit "index" field if present; fall back to array position.
+			idx := arrayPos
+			if explicitIdx, idxErr := jsonparser.GetInt(choice, "index"); idxErr == nil {
+				idx = int(explicitIdx)
+			}
+			delta, dErr := jsonparser.GetString(choice, "delta", "content")
+			if dErr == nil && delta != "" {
+				b, ok := deltas[idx]
 				if !ok {
 					b = &strings.Builder{}
-					deltas[choiceIdx] = b
+					deltas[idx] = b
 				}
 				b.WriteString(delta)
 			}
-			choiceIdx++
+			arrayPos++
 		}, "choices")
 	}
 

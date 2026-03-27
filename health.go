@@ -14,6 +14,7 @@
 package main
 
 import (
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -21,7 +22,7 @@ import (
 	"time"
 )
 
-const healthDialTimeout = 2 * time.Second
+const upstreamDialTimeout = 2 * time.Second
 
 // healthHandler intercepts /healthz and /readyz requests before they reach
 // the reverse proxy. All other paths are forwarded to the proxy untouched.
@@ -50,30 +51,35 @@ func (h *healthHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleHealthz returns 200 if the proxy can establish a TCP connection to
-// the upstream target. A successful TCP dial proves network reachability
-// without sending an HTTP request the upstream might not expect.
+// handleHealthz is a process-level liveness probe. It returns 200 if the
+// server goroutine is running and can serve requests. No external checks —
+// if this handler executes, the process is alive.
 func (h *healthHandler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	addr := hostPort(h.targetURL)
-	conn, err := net.DialTimeout("tcp", addr, healthDialTimeout)
-	if err != nil {
-		http.Error(w, "upstream unreachable: "+err.Error(), http.StatusServiceUnavailable)
-		return
-	}
-	conn.Close()
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok\n"))
 }
 
-// handleReadyz returns 200 only after the audit pipeline (ring buffer,
-// worker pool, collector) is fully initialized. If audit is disabled
-// (--audit-capacity=0), readiness is immediate since there is no pipeline
-// to wait for.
+// handleReadyz returns 200 only after the audit pipeline is initialized AND
+// the upstream target is reachable. If audit is disabled, readiness only
+// requires upstream reachability.
+//
+// Connection errors are logged server-side but never exposed to clients.
 func (h *healthHandler) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 	if !h.ready.Load() {
-		http.Error(w, "pipeline not ready", http.StatusServiceUnavailable)
+		log.Print("readyz: pipeline not ready")
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
 		return
 	}
+
+	addr := hostPort(h.targetURL)
+	conn, err := net.DialTimeout("tcp", addr, upstreamDialTimeout)
+	if err != nil {
+		log.Printf("readyz: upstream unreachable: %v", err)
+		http.Error(w, "not ready", http.StatusServiceUnavailable)
+		return
+	}
+	conn.Close()
+
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("ok\n"))
 }

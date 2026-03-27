@@ -17,6 +17,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,6 +105,7 @@ func processPayload(p *assembledPayload, chain *RedactorChain) *telemetryLog {
 	for c := range catSet {
 		cats = append(cats, string(c))
 	}
+	sort.Strings(cats)
 
 	return &telemetryLog{
 		RequestID:          p.requestID,
@@ -144,6 +147,10 @@ func buildRedactedPayload(fields []ContentField) string {
 	for _, f := range fields {
 		m[f.Path] = f.Text
 	}
-	b, _ := json.Marshal(m)
+	b, err := json.Marshal(m)
+	if err != nil {
+		log.Printf("buildRedactedPayload: marshal error: %v", err)
+		return "{}"
+	}
 	return string(b)
 }

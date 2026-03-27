@@ -84,10 +84,10 @@ All numeric and duration flags are validated at startup. Invalid values (zero du
 
 | Endpoint | Purpose | 200 when |
 |---|---|---|
-| `GET /healthz` | Liveness probe | Proxy is listening and can TCP-dial the upstream target |
-| `GET /readyz` | Readiness probe | Audit pipeline (ring buffer, workers, collector) is initialized |
+| `GET /healthz` | Liveness probe | Server goroutine is running (always 200) |
+| `GET /readyz` | Readiness probe | Audit pipeline is initialized AND upstream target is TCP-reachable |
 
-If audit is disabled (`--audit-capacity=0`), `/readyz` returns 200 immediately.
+If audit is disabled (`--audit-capacity=0`), `/readyz` only checks upstream reachability.
 
 ## What Gets Proxied
 
@@ -167,7 +167,7 @@ Outband automatically scans request payloads for personally identifiable informa
 | Category | Pattern | Validation | Marker |
 |---|---|---|---|
 | SSN | `NNN-NN-NNNN` | — | `[REDACTED:SSN:CC6.1]` |
-| Credit Card | Visa, Mastercard, Amex (13–19 digits) | Luhn checksum | `[REDACTED:CC_NUMBER:CC6.1]` |
+| Credit Card | Visa and Mastercard (16 digits), American Express (15 digits) | Luhn checksum | `[REDACTED:CC_NUMBER:CC6.1]` |
 | Email | RFC 5322 simplified `local@domain.tld` | — | `[REDACTED:EMAIL:CC6.1]` |
 | Phone (US) | 10-digit with optional `+1` country code | — | `[REDACTED:PHONE:CC6.1]` |
 | IPv4 | Dotted quad `N.N.N.N` | Octet range 0–255 | `[REDACTED:IP_ADDRESS:CC6.1]` |

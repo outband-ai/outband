@@ -1027,9 +1027,12 @@ func TestValidateFlagsNegativeValues(t *testing.T) {
 		-1, -1,
 		-1*time.Second, -1*time.Second, -1*time.Second,
 	)
-	// All 11 checks should fail (audit-capacity -1 is < 0, everything else is <= 0).
-	if len(errs) < 10 {
-		t.Errorf("expected many errors for all-negative, got %d: %v", len(errs), errs)
+	// All 11 individual checks fail, plus the block > capacity cross-check (since -1 > -1 is false, it doesn't fire).
+	// Expected: audit-capacity<0, audit-block-size<=0, audit-queue-size<=0, max-payload-size<=0,
+	// worker-queue-size<=0, workers<=0, collector-queue-size<=0, batch-size<=0,
+	// drop-poll-interval<=0, stale-timeout<=0, flush-interval<=0 = 11 errors.
+	if len(errs) != 11 {
+		t.Errorf("expected 11 errors for all-negative, got %d: %v", len(errs), errs)
 	}
 }
 
