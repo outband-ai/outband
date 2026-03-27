@@ -1,0 +1,147 @@
+// Copyright 2026 The Outband Authors
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"sync"
+	"sync/atomic"
+	"time"
+)
+
+// telemetryLog is the output record from the processing pipeline.
+type telemetryLog struct {
+	RequestID          uint64   `json:"request_id"`
+	Timestamp          time.Time `json:"timestamp"`
+	OriginalHash       string   `json:"original_hash"`
+	RedactedPayload    string   `json:"redacted_payload"`
+	RedactedHash       string   `json:"redacted_hash"`
+	RedactionLevel     string   `json:"redaction_level"`
+	PIICategoriesFound []string `json:"pii_categories_found"`
+	ExtractorUsed      string   `json:"extractor_used"`
+	FieldsScanned      int      `json:"fields_scanned"`
+	CaptureComplete    bool     `json:"capture_complete"`
+}
+
+// workerStats exposes atomic counters for observability.
+type workerStats struct {
+	resultDropped atomic.Int64
+}
+
+// startWorkers launches numWorkers goroutines that process assembled payloads.
+// Workers exit when input is closed. Returns a function that blocks until
+// all workers have exited.
+func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- *telemetryLog, stats *workerStats) (wait func()) {
+	var wg sync.WaitGroup
+	for range numWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for payload := range input {
+				entry := processPayload(payload)
+				// Non-blocking send: if output is full, drop the entry.
+				select {
+				case output <- entry:
+				default:
+					stats.resultDropped.Add(1)
+				}
+			}
+		}()
+	}
+	return wg.Wait
+}
+
+// processPayload is the core per-request processing function.
+// It extracts content fields, redacts PII, computes hashes, and builds
+// the telemetry log entry.
+func processPayload(p *assembledPayload) *telemetryLog {
+	now := time.Now()
+	originalHash := hashPayload(p.data)
+
+	ext := extractorForAPI(p.apiType)
+	var fields []ContentField
+	if ext != nil {
+		fields = ext.ExtractContent(p.data)
+	}
+
+	var allCategories []piiCategory
+	var redactedFields []ContentField
+	for _, f := range fields {
+		r := redactText(f.Text)
+		redactedFields = append(redactedFields, ContentField{
+			Text:  r.text,
+			Path:  f.Path,
+			Index: f.Index,
+		})
+		allCategories = append(allCategories, r.categories...)
+	}
+
+	redactedPayload := buildRedactedPayload(redactedFields)
+	redactedHash := hashRedacted(redactedPayload, now)
+
+	// Deduplicate categories.
+	catSet := make(map[piiCategory]struct{})
+	for _, c := range allCategories {
+		catSet[c] = struct{}{}
+	}
+	cats := make([]string, 0, len(catSet))
+	for c := range catSet {
+		cats = append(cats, string(c))
+	}
+
+	return &telemetryLog{
+		RequestID:          p.requestID,
+		Timestamp:          now,
+		OriginalHash:       originalHash,
+		RedactedPayload:    redactedPayload,
+		RedactedHash:       redactedHash,
+		RedactionLevel:     "pattern-based",
+		PIICategoriesFound: cats,
+		ExtractorUsed:      extractorName(p.apiType),
+		FieldsScanned:      len(fields),
+		CaptureComplete:    p.complete,
+	}
+}
+
+// hashPayload computes the SHA-256 hex digest of a byte slice.
+func hashPayload(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
+}
+
+// hashRedacted computes the SHA-256 hex digest of the redacted payload
+// concatenated with the nanosecond-precision timestamp.
+func hashRedacted(payload string, ts time.Time) string {
+	h := sha256.New()
+	h.Write([]byte(payload))
+	h.Write([]byte(ts.Format(time.RFC3339Nano)))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// buildRedactedPayload serializes extracted-and-redacted content fields
+// as a JSON object mapping path -> redacted text.
+func buildRedactedPayload(fields []ContentField) string {
+	if len(fields) == 0 {
+		return "{}"
+	}
+	m := make(map[string]string, len(fields))
+	for _, f := range fields {
+		m[f.Path] = f.Text
+	}
+	b, _ := json.Marshal(m)
+	return string(b)
+}
+

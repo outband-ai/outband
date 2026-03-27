@@ -1,6 +1,6 @@
 FROM golang:1.26 AS builder
 WORKDIR /src
-COPY go.mod *.go ./
+COPY go.mod go.sum *.go ./
 COPY cmd/ ./cmd/
 RUN CGO_ENABLED=0 go build -o /outband .
 RUN CGO_ENABLED=0 go build -o /mockllm ./cmd/mockllm

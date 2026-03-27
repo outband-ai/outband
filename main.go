@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -97,6 +99,14 @@ func main() {
 	auditBlockSize := flag.Int("audit-block-size", defaultBlockSize, "audit buffer block size in bytes")
 	auditQueueSize := flag.Int("audit-queue-size", defaultQueueSize, "audit queue slot count")
 	dropPollInterval := flag.Duration("drop-poll-interval", defaultDropPollInterval, "interval for polling drop counter")
+	apiFormat := flag.String("api-format", "", "API payload format: openai, anthropic (auto-detected from --target if omitted)")
+	maxPayloadSize := flag.Int("max-payload-size", defaultMaxPayloadSize, "per-request payload size limit in bytes")
+	staleTimeout := flag.Duration("stale-timeout", defaultStaleTimeout, "staleness timeout for incomplete payloads")
+	workerQueueSize := flag.Int("worker-queue-size", defaultWorkerQueueSize, "channel buffer size between assembler and workers")
+	numWorkers := flag.Int("workers", runtime.GOMAXPROCS(0), "number of redaction worker goroutines")
+	collectorQueueSize := flag.Int("collector-queue-size", defaultCollectorQueueSize, "channel buffer size between workers and collector")
+	batchSize := flag.Int("batch-size", defaultBatchSize, "collector batch size before flush")
+	flushInterval := flag.Duration("flush-interval", defaultFlushInterval, "collector flush interval")
 	flag.Parse()
 
 	if *target == "" {
@@ -118,6 +128,7 @@ func main() {
 
 	var auditQueue chan *auditBlock
 	var stopPoller func()
+	var waitPipeline func()
 	if *auditCapacity > 0 {
 		pool := newBlockPool(*auditCapacity, *auditBlockSize)
 		auditQueue = make(chan *auditBlock, *auditQueueSize)
@@ -126,14 +137,65 @@ func main() {
 		cfg.auditQueue = auditQueue
 		cfg.drops = drops
 		cfg.nextReqID = &atomic.Uint64{}
+
+		// Determine API type: explicit flag overrides URL heuristic.
+		apiT := parseAPIFormat(*apiFormat)
+		if apiT == apiTypeUnknown {
+			apiT = detectAPIType(targetURL)
+		}
+
+		// Pipeline channels.
+		workerInput := make(chan *assembledPayload, *workerQueueSize)
+		resultsChannel := make(chan *telemetryLog, *collectorQueueSize)
+
+		// Stage 1: Assembler.
+		asmStats := &assemblerStats{}
+		assemblerDone := make(chan struct{})
 		go func() {
-			for blk := range auditQueue {
-				pool.put(blk)
-			}
+			defer close(assemblerDone)
+			startAssembler(auditQueue, assemblerConfig{
+				maxPayloadSize: *maxPayloadSize,
+				staleTimeout:   *staleTimeout,
+				workerInput:    workerInput,
+				pool:           pool,
+				apiType:        apiT,
+			}, asmStats)
 		}()
+
+		// Stage 2: Workers.
+		wkStats := &workerStats{}
+		waitWorkers := startWorkers(*numWorkers, workerInput, resultsChannel, wkStats)
+
+		// Stage 3: Collector.
+		cStats := &collectorStats{}
+		collectorDone := make(chan struct{})
+		logger := log.Default()
+		go func() {
+			defer close(collectorDone)
+			startCollector(collectorConfig{
+				batchSize:     *batchSize,
+				flushInterval: *flushInterval,
+				input:         resultsChannel,
+				flush: func(batch []*telemetryLog) {
+					for _, entry := range batch {
+						data, _ := json.Marshal(entry)
+						logger.Printf("TELEMETRY: %s", data)
+					}
+				},
+			}, cStats)
+		}()
+
+		// Pipeline shutdown waiter: assembler → workers → collector.
+		waitPipeline = func() {
+			<-assemblerDone      // assembler finished, workerInput closed
+			waitWorkers()        // all workers finished
+			close(resultsChannel) // signal collector
+			<-collectorDone      // collector flushed and exited
+		}
+
 		stopPoller = startDropPoller(context.Background(), drops, *dropPollInterval, log.Default())
-		log.Printf("audit capture enabled: pool=%dMB, block=%dKB, queue=%d",
-			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize)
+		log.Printf("audit pipeline enabled: pool=%dMB, block=%dKB, queue=%d, workers=%d",
+			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize, *numWorkers)
 	}
 
 	proxy := newProxy(cfg)
@@ -164,6 +226,9 @@ func main() {
 	// do not panic sending to a closed channel.
 	if auditQueue != nil {
 		close(auditQueue)
+	}
+	if waitPipeline != nil {
+		waitPipeline()
 	}
 	if stopPoller != nil {
 		stopPoller()

@@ -134,13 +134,58 @@ Inter-chunk latency percentiles (n~10,000):
 | p95 | 6.03ms | 6.46ms | **0.43ms** |
 | p99 | 7.01ms | 7.91ms | **0.90ms** |
 
+## PII Redaction
+
+Outband automatically scans request payloads for personally identifiable information (PII) and replaces matches with redaction markers before any telemetry is persisted. The upstream request is never modified — redaction applies only to the audit copy.
+
+### Supported PII Categories
+
+| Category | Pattern | Validation | Marker |
+|---|---|---|---|
+| SSN | `NNN-NN-NNNN` | — | `[REDACTED:SSN:CC6.1]` |
+| Credit Card | Visa, Mastercard, Amex (13–19 digits) | Luhn checksum | `[REDACTED:CC_NUMBER:CC6.1]` |
+| Email | RFC 5322 simplified `local@domain.tld` | — | `[REDACTED:EMAIL:CC6.1]` |
+| Phone (US) | 10-digit with optional `+1` country code | — | `[REDACTED:PHONE:CC6.1]` |
+| IPv4 | Dotted quad `N.N.N.N` | Octet range 0–255 | `[REDACTED:IP_ADDRESS:CC6.1]` |
+
+The `CC6.1` tag maps to SOC 2 Common Criteria control 6.1 (Logical and Physical Access Controls).
+
+### What Is Scanned
+
+Only natural-language content fields extracted from the request body:
+
+| Provider | Extracted paths |
+|---|---|
+| OpenAI | `messages[*].content` (string or multimodal array) |
+| Anthropic | `system` (string or content block array), `messages[*].content` |
+| SSE streams | Delta content concatenated per choice/block before scanning |
+
+### What Is NOT Scanned
+
+- **Structural JSON fields**: model names, token counts, IDs (`workspace_id`, `request_id`), temperature, and all other configuration parameters. This is by design — scanning structural fields produces false positives (e.g., a 16-digit workspace ID triggering credit card detection).
+- **HTTP headers**: Authorization tokens, cookies, custom headers.
+- **URL paths and query parameters**.
+- **Response bodies** (future work).
+
+### What Is NOT Caught
+
+Pattern-based redaction (`redaction_level: "pattern-based"`) catches structured PII with well-defined formats. It does **not** catch:
+
+- Names mentioned in prose
+- Street addresses
+- Medical information
+- Company-proprietary data
+- Any unstructured PII without a recognizable pattern
+
+A future `"nlp-based"` redaction level will address unstructured PII categories.
+
 ## Architecture
 
 - `httputil.ReverseProxy` with `Rewrite` (not deprecated `Director`)
 - `http.Transport` configured for HTTP/2 (`ForceAttemptHTTP2`), connection pooling (1000 idle / 100 per host), and transparent compression passthrough
 - `sync.Pool` buffer pool to reduce GC pressure (32KB buffers)
 - SSE auto-detection: stdlib flushes immediately for `text/event-stream` and chunked responses
-- Zero external dependencies -- stdlib only
+- Audit pipeline: TeeReader → ring buffer → session assembler → worker pool (extract + redact + hash) → double-buffered collector
 
 ## Tests
 
