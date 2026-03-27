@@ -304,6 +304,7 @@ func main() {
 	<-sig
 
 	log.Println("shutting down")
+	ready.Store(false) // reject /readyz immediately so K8s stops routing traffic
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := server.Shutdown(ctx); err != nil {

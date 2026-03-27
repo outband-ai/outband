@@ -87,20 +87,14 @@ func (h *healthHandler) handleReadyz(w http.ResponseWriter, _ *http.Request) {
 // hostPort extracts the host:port from a URL, defaulting to port 443 for
 // https and port 80 for http when no explicit port is present.
 func hostPort(u *url.URL) string {
-	if h := u.Host; portIncluded(h) {
-		return h
-	}
 	host := u.Hostname()
+	if p := u.Port(); p != "" {
+		return net.JoinHostPort(host, p)
+	}
 	switch u.Scheme {
 	case "https":
 		return net.JoinHostPort(host, "443")
 	default:
 		return net.JoinHostPort(host, "80")
 	}
-}
-
-// portIncluded reports whether the host string already includes a port.
-func portIncluded(host string) bool {
-	_, _, err := net.SplitHostPort(host)
-	return err == nil
 }
