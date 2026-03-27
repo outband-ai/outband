@@ -291,7 +291,11 @@ func main() {
 		promRegistry := prometheus.NewRegistry()
 		metrics = newMetrics(promRegistry, drops)
 		metricsAddr := fmt.Sprintf(":%d", *metricsPort)
-		metricsServer = startMetricsServer(metricsAddr, promRegistry)
+		var metricsErr error
+		metricsServer, metricsErr = startMetricsServer(metricsAddr, promRegistry)
+		if metricsErr != nil {
+			log.Fatalf("failed to start metrics server on %s: %v", metricsAddr, metricsErr)
+		}
 
 		// Aggregator.
 		chain := &RedactorChain{redactors: []Redactor{NewRegexRedactor()}}
@@ -384,6 +388,7 @@ func main() {
 		dispatcher := NewEgressDispatcher(logger, egressTargets...)
 
 		// Evidence ticker goroutine.
+		const dispatchTimeout = 30 * time.Second
 		var tickerCtx context.Context
 		tickerCtx, tickerCancel = context.WithCancel(context.Background())
 		tickerDone = make(chan struct{})
@@ -404,9 +409,13 @@ func main() {
 					lastDropsReported = currentDrops
 					lastIOErrsReported = currentIOErrs
 					summary := aggregator.SnapshotAndReset(windowIOErrs, windowDrops, false, version)
-					if err := dispatcher.Dispatch(tickerCtx, summary); err != nil {
+					// Per-dispatch timeout prevents a slow webhook from
+					// blocking subsequent SnapshotAndReset windows.
+					dCtx, dCancel := context.WithTimeout(tickerCtx, dispatchTimeout)
+					if err := dispatcher.Dispatch(dCtx, summary); err != nil {
 						log.Printf("egress dispatch error: %v", err)
 					}
+					dCancel()
 					metrics.evidenceReports.Inc()
 				case <-tickerCtx.Done():
 					return
@@ -416,7 +425,7 @@ func main() {
 
 		// Wire latency recording into proxy config.
 		cfg.recordOverhead = func(d time.Duration) {
-			aggregator.RecordProcessed(d)
+			aggregator.RecordLatency(d)
 			metrics.proxyOverhead.Observe(d.Seconds())
 			metrics.requestsTotal.Inc()
 		}
@@ -461,21 +470,33 @@ func main() {
 	// expires. With 20s SSE streams and a short deadline, K8s sends SIGKILL.
 	httpCtx, httpCancel := context.WithTimeout(context.Background(), *shutdownDrain)
 	defer httpCancel()
-	if err := server.Shutdown(httpCtx); err != nil {
-		log.Printf("network drain timeout: %v", err)
+	shutdownErr := server.Shutdown(httpCtx)
+	if shutdownErr != nil {
+		log.Printf("network drain timeout: %v", shutdownErr)
+		// Force-close remaining connections so no TeeReaders survive.
+		server.Close()
 	}
 
-	// 3. HTTP server is DEAD. No new TeeReaders can be created.
-	// It is now mathematically safe to close the queue without panics.
+	// 3. HTTP server is fully stopped. No active TeeReaders remain.
+	// Safe to close the queue without send-on-closed-channel panics.
 	if auditQueue != nil {
 		close(auditQueue)
 	}
 
-	// 4. Budget the internal flush — un-cancellable 5-second deadline.
+	// 4. Budget the internal flush — 5-second deadline enforced via goroutine.
 	flushCtx, flushCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer flushCancel()
 	if waitPipeline != nil {
-		waitPipeline() // assembler → workers → collector (final flushFunc call)
+		pipelineDone := make(chan struct{})
+		go func() {
+			waitPipeline()
+			close(pipelineDone)
+		}()
+		select {
+		case <-pipelineDone:
+		case <-flushCtx.Done():
+			log.Println("warning: pipeline flush exceeded 5s budget")
+		}
 	}
 
 	// 5. Stop the evidence ticker.

@@ -48,12 +48,12 @@ type JSONLWriter struct {
 // is created if it does not exist. If a current file already exists, it is
 // resumed (appended to) with the existing size tracked.
 func NewJSONLWriter(dir string, maxSize int64, maxAge time.Duration, maxFiles int) (*JSONLWriter, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
 
 	path := filepath.Join(dir, activeFileName)
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return nil, err
 	}
@@ -105,10 +105,13 @@ func (w *JSONLWriter) Flush(batch []*telemetryLog) error {
 		}
 		line = append(line, '\n')
 		n, err := w.file.Write(line)
+		totalWritten += int64(n)
 		if err != nil {
+			// Update currentBytes with partial writes so needsRotation
+			// sees the correct on-disk size on the next call.
+			w.currentBytes += totalWritten
 			return err
 		}
-		totalWritten += int64(n)
 	}
 
 	if len(batch) > 0 && totalWritten > 0 {
@@ -142,7 +145,7 @@ func (w *JSONLWriter) rotate() error {
 		return err
 	}
 
-	ts := time.Now().UTC().Format("20060102T150405Z")
+	ts := time.Now().UTC().Format("20060102T150405.000000000Z")
 	oldPath := filepath.Join(w.dir, activeFileName)
 	newPath := filepath.Join(w.dir, rotatedPrefix+ts+rotatedSuffix)
 	if err := os.Rename(oldPath, newPath); err != nil {
@@ -152,7 +155,7 @@ func (w *JSONLWriter) rotate() error {
 	f, err := os.OpenFile(
 		filepath.Join(w.dir, activeFileName),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND,
-		0o644,
+		0o600,
 	)
 	if err != nil {
 		return err

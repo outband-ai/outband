@@ -102,7 +102,7 @@ func NewLocalJSONTarget(outputDir string) *LocalJSONTarget {
 }
 
 func (t *LocalJSONTarget) Push(_ context.Context, summary *EvidenceSummary) error {
-	if err := os.MkdirAll(t.outputDir, 0o755); err != nil {
+	if err := os.MkdirAll(t.outputDir, 0o700); err != nil {
 		return err
 	}
 	data, err := json.MarshalIndent(summary, "", "  ")
@@ -110,9 +110,9 @@ func (t *LocalJSONTarget) Push(_ context.Context, summary *EvidenceSummary) erro
 		return err
 	}
 	filename := fmt.Sprintf("evidence-%s.json",
-		summary.WindowStart.UTC().Format("2006-01-02T15-04-05"))
+		summary.WindowStart.UTC().Format("2006-01-02T15-04-05.000000000"))
 	path := filepath.Join(t.outputDir, filename)
-	return os.WriteFile(path, data, 0o644)
+	return os.WriteFile(path, data, 0o600)
 }
 
 func (t *LocalJSONTarget) Name() string { return "local-json" }

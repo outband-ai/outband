@@ -59,14 +59,18 @@ type EvidenceSummary struct {
 type Aggregator struct {
 	mu sync.Mutex
 
-	windowStart       time.Time
-	startTime         time.Time
-	requestsProcessed uint64
-	requestsAudited   uint64
-	piiDetected       uint64
-	eventsByCategory  map[string]uint64
-	redactorName      string
+	windowStart      time.Time
+	startTime        time.Time
+	requestsAudited  uint64
+	piiDetected      uint64
+	eventsByCategory map[string]uint64
+	redactorName     string
 
+	// Latency tracking uses its own sample counter (latencySamples) rather
+	// than requestsAudited because latency is recorded at ingress (Rewrite
+	// hook) while audited count is recorded at flush (Ingest). Using separate
+	// counters keeps each population consistent with its own data.
+	latencySamples  uint64
 	latencyBuckets  [maxLatencyBucketMS]uint64
 	latencyOverflow uint64
 }
@@ -81,12 +85,16 @@ func NewAggregator(redactorName string) *Aggregator {
 	}
 }
 
-// RecordProcessed records a single request's proxy ingress overhead latency.
+// RecordLatency records a single request's proxy ingress overhead latency.
 // Called from the Rewrite hook on every request (hot path).
-func (a *Aggregator) RecordProcessed(latency time.Duration) {
+//
+// This does NOT increment requestsAudited — that happens in Ingest at
+// flush time. Latency samples and audit counts are tracked separately
+// because they are recorded at different lifecycle phases (ingress vs flush).
+func (a *Aggregator) RecordLatency(latency time.Duration) {
 	ms := int(latency.Milliseconds())
 	a.mu.Lock()
-	a.requestsProcessed++
+	a.latencySamples++
 	if ms >= 0 && ms < maxLatencyBucketMS {
 		a.latencyBuckets[ms]++
 	} else {
@@ -111,10 +119,10 @@ func (a *Aggregator) Ingest(batch []*telemetryLog) {
 // computePercentile walks the 100-bucket histogram to find the given
 // percentile (0.0–1.0). Called under lock. Returns the bucket index (ms).
 func (a *Aggregator) computePercentile(target float64) int {
-	if a.requestsProcessed == 0 {
+	if a.latencySamples == 0 {
 		return 0
 	}
-	targetCount := uint64(float64(a.requestsProcessed) * target)
+	targetCount := uint64(float64(a.latencySamples) * target)
 	if targetCount == 0 {
 		targetCount = 1
 	}
@@ -145,15 +153,21 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 		catCopy[k] = v
 	}
 
+	// Compute processed as audited + dropped so both counters come from the
+	// same lifecycle phase (flush-time for audited, drop-time for dropped).
+	// This avoids the skew caused by counting processed at ingress and
+	// audited at flush — requests near window boundaries would land in
+	// different windows, producing wrong coverage percentages.
+	processed := a.requestsAudited + droppedCount
 	var coverage float64
-	if a.requestsProcessed > 0 {
-		coverage = float64(a.requestsAudited) / float64(a.requestsProcessed) * 100
+	if processed > 0 {
+		coverage = float64(a.requestsAudited) / float64(processed) * 100
 	}
 
 	summary := &EvidenceSummary{
 		WindowStart:            a.windowStart,
 		WindowEnd:              now,
-		TotalRequestsProcessed: a.requestsProcessed,
+		TotalRequestsProcessed: processed,
 		TotalRequestsAudited:   a.requestsAudited,
 		TotalRequestsDropped:   droppedCount,
 		AuditCoveragePercent:   coverage,
@@ -176,10 +190,10 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 
 	// Reset for next window.
 	a.windowStart = now
-	a.requestsProcessed = 0
 	a.requestsAudited = 0
 	a.piiDetected = 0
 	a.eventsByCategory = make(map[string]uint64)
+	a.latencySamples = 0
 	a.latencyOverflow = 0
 	a.latencyBuckets = [maxLatencyBucketMS]uint64{}
 

@@ -15,7 +15,9 @@ package main
 
 import (
 	"log"
+	"net"
 	"net/http"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -125,15 +127,24 @@ func (c *dropCollector) Collect(ch chan<- prometheus.Metric) {
 // ---------------------------------------------------------------------------
 
 // startMetricsServer starts an HTTP server serving /metrics on the given
-// address. Returns the server for graceful shutdown.
-func startMetricsServer(addr string, gatherer prometheus.Gatherer) *http.Server {
+// address. Pre-binds the port so callers fail fast on address conflicts.
+// Returns the server for graceful shutdown.
+func startMetricsServer(addr string, gatherer prometheus.Gatherer) (*http.Server, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
 	go func() {
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server error: %v", err)
 		}
 	}()
-	return srv
+	return srv, nil
 }

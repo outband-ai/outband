@@ -17,7 +17,7 @@ Corresponds to the `telemetryLog` struct in `worker.go`.
 | Field | Type | Description | Compliance Justification |
 |---|---|---|---|
 | `request_id` | uint64 | Links back to the session assembler's original request. Monotonically increasing per sidecar instance. | **CC6.1** — Unique identifier enabling correlation of access events across the audit trail. |
-| `timestamp` | string (ISO 8601, nanosecond) | Time of capture. | **CC6.1** — Temporal ordering of access events for forensic reconstruction. **CC9.2** — Time-correlated evidence of continuous risk monitoring. |
+| `timestamp` | string (RFC 3339 / Go time.Time JSON encoding) | Time of capture. | **CC6.1** — Temporal ordering of access events for forensic reconstruction. **CC9.2** — Time-correlated evidence of continuous risk monitoring. |
 | `original_hash` | string (SHA-256 hex) | Hash of raw payload before redaction. | **CC6.1** — Cryptographic proof of capture integrity; enables detection of tampering between capture and audit review. **ISO 42001** — Non-repudiation for AI transaction records. |
 | `redacted_payload` | string | Content fields with PII markers applied. JSON object mapping extraction path to redacted text. | **CC6.1** — Demonstrates active data classification and tagging. **CC9.2** — Evidence that sensitive data exposure is mitigated before downstream consumption. |
 | `redacted_hash` | string (SHA-256 hex) | Hash of redacted payload concatenated with nanosecond timestamp. | **CC6.1** — Tamper-evident seal on redacted output; timestamp binding prevents replay attacks. **ISO 42001** — Cryptographic evidence chain for AI data governance. |
@@ -43,8 +43,8 @@ and any downstream evidence report generation (e.g., PDF via separate tooling).
 
 | Field | Type | Description | Compliance Justification |
 |---|---|---|---|
-| `window_start` | string (ISO 8601) | Beginning of the aggregation window. | **CC6.1** — Defines the temporal scope of this evidence artifact. |
-| `window_end` | string (ISO 8601) | End of the aggregation window. | **CC6.1** — Defines the temporal scope of this evidence artifact. |
+| `window_start` | string (RFC 3339 / Go time.Time JSON encoding) | Beginning of the aggregation window. | **CC6.1** — Defines the temporal scope of this evidence artifact. |
+| `window_end` | string (RFC 3339 / Go time.Time JSON encoding) | End of the aggregation window. | **CC6.1** — Defines the temporal scope of this evidence artifact. |
 | `total_requests_processed` | uint64 | Total HTTP requests that transited the proxy during the window. | **CC6.6** — Quantifies total traffic volume at the system boundary. |
 | `total_requests_audited` | uint64 | Requests that completed the full audit pipeline (extraction → redaction → logging). | **CC6.1** — Quantifies the scope of access event logging. **CC6.6** — Demonstrates inspection depth at the boundary. |
 | `total_requests_dropped` | uint64 | Requests where audit capture was abandoned due to buffer pressure. | **CC6.6** — Transparency about uninspected traffic. **CC9.2** — Quantifies risk from dropped audit coverage. |

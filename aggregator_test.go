@@ -46,17 +46,19 @@ func TestAggregatorIngest(t *testing.T) {
 	}
 }
 
-func TestAggregatorRecordProcessed(t *testing.T) {
+func TestAggregatorRecordLatency(t *testing.T) {
 	agg := NewAggregator("test")
 
-	agg.RecordProcessed(1 * time.Millisecond)
-	agg.RecordProcessed(1 * time.Millisecond)
-	agg.RecordProcessed(50 * time.Millisecond)
-	agg.RecordProcessed(99 * time.Millisecond)
+	agg.RecordLatency(1 * time.Millisecond)
+	agg.RecordLatency(1 * time.Millisecond)
+	agg.RecordLatency(50 * time.Millisecond)
+	agg.RecordLatency(99 * time.Millisecond)
 
+	// RecordLatency only records latency samples; it does not increment
+	// requestsAudited. TotalRequestsProcessed = audited + dropped.
 	snap := agg.SnapshotAndReset(0, 0, false, "test")
-	if snap.TotalRequestsProcessed != 4 {
-		t.Fatalf("processed: got %d, want 4", snap.TotalRequestsProcessed)
+	if snap.TotalRequestsProcessed != 0 {
+		t.Fatalf("processed (no ingest): got %d, want 0", snap.TotalRequestsProcessed)
 	}
 
 	// After snapshot, counters should be zero.
@@ -71,7 +73,7 @@ func TestAggregatorComputePercentile(t *testing.T) {
 
 	// 100 requests at 1ms each.
 	for i := 0; i < 100; i++ {
-		agg.RecordProcessed(1 * time.Millisecond)
+		agg.RecordLatency(1 * time.Millisecond)
 	}
 	snap := agg.SnapshotAndReset(0, 0, false, "test")
 	if snap.ProxyP50LatencyMS != 1 {
@@ -87,12 +89,12 @@ func TestAggregatorComputePercentileMixed(t *testing.T) {
 
 	// 90 requests at 1ms, 9 at 5ms, 1 at 50ms.
 	for i := 0; i < 90; i++ {
-		agg.RecordProcessed(1 * time.Millisecond)
+		agg.RecordLatency(1 * time.Millisecond)
 	}
 	for i := 0; i < 9; i++ {
-		agg.RecordProcessed(5 * time.Millisecond)
+		agg.RecordLatency(5 * time.Millisecond)
 	}
-	agg.RecordProcessed(50 * time.Millisecond)
+	agg.RecordLatency(50 * time.Millisecond)
 
 	snap := agg.SnapshotAndReset(0, 0, false, "test")
 	if snap.ProxyP50LatencyMS != 1 {
@@ -111,13 +113,14 @@ func TestAggregatorComputePercentileMixed(t *testing.T) {
 func TestAggregatorLatencyOverflow(t *testing.T) {
 	agg := NewAggregator("test")
 
-	agg.RecordProcessed(1 * time.Millisecond)
-	agg.RecordProcessed(100 * time.Millisecond) // overflow
-	agg.RecordProcessed(200 * time.Millisecond) // overflow
+	agg.RecordLatency(1 * time.Millisecond)
+	agg.RecordLatency(100 * time.Millisecond) // overflow
+	agg.RecordLatency(200 * time.Millisecond) // overflow
 
 	snap := agg.SnapshotAndReset(0, 0, false, "test")
-	if snap.TotalRequestsProcessed != 3 {
-		t.Fatalf("processed: got %d, want 3", snap.TotalRequestsProcessed)
+	// No Ingest, no drops: processed = 0. Latency is tracked separately.
+	if snap.TotalRequestsProcessed != 0 {
+		t.Fatalf("processed: got %d, want 0", snap.TotalRequestsProcessed)
 	}
 	if snap.LatencyOverflowCount != 2 {
 		t.Fatalf("overflow: got %d, want 2", snap.LatencyOverflowCount)
@@ -127,15 +130,16 @@ func TestAggregatorLatencyOverflow(t *testing.T) {
 func TestAggregatorSnapshotAndReset(t *testing.T) {
 	agg := NewAggregator("pattern-based")
 
-	agg.RecordProcessed(2 * time.Millisecond)
+	agg.RecordLatency(2 * time.Millisecond)
 	agg.Ingest([]*telemetryLog{
 		{PIICategoriesFound: []string{"SSN"}},
 	})
 
 	snap := agg.SnapshotAndReset(3, 5, true, "v1.0.0")
 
-	if snap.TotalRequestsProcessed != 1 {
-		t.Fatalf("processed: got %d, want 1", snap.TotalRequestsProcessed)
+	// processed = audited + dropped = 1 + 5 = 6
+	if snap.TotalRequestsProcessed != 6 {
+		t.Fatalf("processed: got %d, want 6", snap.TotalRequestsProcessed)
 	}
 	if snap.TotalRequestsAudited != 1 {
 		t.Fatalf("audited: got %d, want 1", snap.TotalRequestsAudited)
@@ -216,19 +220,35 @@ func TestAggregatorDeepCopy(t *testing.T) {
 func TestAggregatorCoverage(t *testing.T) {
 	agg := NewAggregator("test")
 
-	// 10 processed, 7 audited = 70%
-	for i := 0; i < 10; i++ {
-		agg.RecordProcessed(1 * time.Millisecond)
-	}
+	// 7 audited + 3 dropped = 10 processed. coverage = 7/10 = 70%.
 	batch := make([]*telemetryLog, 7)
 	for i := range batch {
 		batch[i] = &telemetryLog{}
 	}
 	agg.Ingest(batch)
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 3, false, "test")
+	if snap.TotalRequestsProcessed != 10 {
+		t.Fatalf("processed: got %d, want 10", snap.TotalRequestsProcessed)
+	}
 	if snap.AuditCoveragePercent != 70 {
 		t.Fatalf("coverage: got %f, want 70", snap.AuditCoveragePercent)
+	}
+}
+
+func TestAggregatorCoverageFullAudit(t *testing.T) {
+	agg := NewAggregator("test")
+
+	// 5 audited, 0 dropped = 100% coverage.
+	batch := make([]*telemetryLog, 5)
+	for i := range batch {
+		batch[i] = &telemetryLog{}
+	}
+	agg.Ingest(batch)
+
+	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	if snap.AuditCoveragePercent != 100 {
+		t.Fatalf("coverage: got %f, want 100", snap.AuditCoveragePercent)
 	}
 }
 
@@ -257,12 +277,12 @@ func TestAggregatorConcurrency(t *testing.T) {
 		}()
 	}
 
-	// 100 goroutines calling RecordProcessed.
+	// 100 goroutines calling RecordLatency.
 	for i := 0; i < 100; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			agg.RecordProcessed(time.Duration(1) * time.Millisecond)
+			agg.RecordLatency(time.Duration(1) * time.Millisecond)
 		}()
 	}
 

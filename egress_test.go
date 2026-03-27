@@ -51,7 +51,7 @@ func TestLocalJSONTargetWritesFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	expected := filepath.Join(dir, "evidence-2026-03-27T14-00-00.json")
+	expected := filepath.Join(dir, "evidence-2026-03-27T14-00-00.000000000.json")
 	data, err := os.ReadFile(expected)
 	if err != nil {
 		t.Fatalf("file not created: %v", err)
