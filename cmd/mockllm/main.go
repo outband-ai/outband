@@ -62,8 +62,12 @@ func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.Han
 			return
 		}
 
-		body, _ := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 		r.Body.Close()
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to read request body: %v", err), http.StatusBadRequest)
+			return
+		}
 
 		log.Printf("%s %s Content-Length:%d", r.Method, r.URL.Path, r.ContentLength)
 
