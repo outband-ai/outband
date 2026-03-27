@@ -6,10 +6,10 @@ services:
     ports:
       - "9090:9090"
     environment:
-      MOCK_DELAY: "200ms"
+      MOCK_DELAY: "${MOCK_DELAY:-200ms}"
       MOCK_LISTEN: ":9090"
-      MOCK_CHUNKS: "5"
-      MOCK_CHUNK_DELAY: "50ms"
+      MOCK_CHUNKS: "${MOCK_CHUNKS:-5}"
+      MOCK_CHUNK_DELAY: "${MOCK_CHUNK_DELAY:-50ms}"
 
   proxy:
     build:
