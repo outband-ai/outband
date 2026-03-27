@@ -1,0 +1,22 @@
+services:
+  mockllm:
+    build:
+      context: .
+      target: mockllm
+    ports:
+      - "9090:9090"
+    environment:
+      MOCK_DELAY: "200ms"
+      MOCK_LISTEN: ":9090"
+      MOCK_CHUNKS: "5"
+      MOCK_CHUNK_DELAY: "50ms"
+
+  proxy:
+    build:
+      context: .
+      target: proxy
+    ports:
+      - "8081:8080"
+    command: ["--target", "http://mockllm:9090", "--listen", "0.0.0.0:8080"]
+    depends_on:
+      - mockllm
