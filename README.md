@@ -64,6 +64,30 @@ Override via environment: `MOCK_DELAY=500ms docker compose up`
 |---|---|---|
 | `--target` | (required) | Upstream API URL |
 | `--listen` | `localhost:8080` | Address to listen on |
+| `--version` | | Print version and exit |
+| `--api-format` | (auto-detect) | API format: `openai`, `anthropic` |
+| `--audit-capacity` | `52428800` (50MB) | Audit buffer pool size (0 to disable) |
+| `--audit-block-size` | `65536` (64KB) | Audit buffer block size |
+| `--audit-queue-size` | `256` | Audit queue slot count |
+| `--max-payload-size` | `10485760` (10MB) | Per-request payload size limit |
+| `--stale-timeout` | `30s` | Staleness timeout for incomplete payloads |
+| `--workers` | `GOMAXPROCS` | Redaction worker goroutines |
+| `--worker-queue-size` | `64` | Assembler → worker channel buffer |
+| `--collector-queue-size` | `128` | Worker → collector channel buffer |
+| `--batch-size` | `1000` | Collector batch size before flush |
+| `--flush-interval` | `5s` | Collector flush interval |
+| `--drop-poll-interval` | `5s` | Drop counter polling interval |
+
+All numeric and duration flags are validated at startup. Invalid values (zero durations, negative sizes) produce clear error messages and a non-zero exit code.
+
+## Health Probes
+
+| Endpoint | Purpose | 200 when |
+|---|---|---|
+| `GET /healthz` | Liveness probe | Server goroutine is running (always 200) |
+| `GET /readyz` | Readiness probe | Audit pipeline is initialized AND upstream target is TCP-reachable |
+
+If audit is disabled (`--audit-capacity=0`), `/readyz` only checks upstream reachability.
 
 ## What Gets Proxied
 
@@ -134,13 +158,88 @@ Inter-chunk latency percentiles (n~10,000):
 | p95 | 6.03ms | 6.46ms | **0.43ms** |
 | p99 | 7.01ms | 7.91ms | **0.90ms** |
 
+## PII Redaction
+
+Outband automatically scans request payloads for personally identifiable information (PII) and replaces matches with redaction markers before any telemetry is persisted. The upstream request is never modified — redaction applies only to the audit copy.
+
+### Supported PII Categories
+
+| Category | Pattern | Validation | Marker |
+|---|---|---|---|
+| SSN | `NNN-NN-NNNN` | — | `[REDACTED:SSN:CC6.1]` |
+| Credit Card | Visa and Mastercard (16 digits), American Express (15 digits) | Luhn checksum | `[REDACTED:CC_NUMBER:CC6.1]` |
+| Email | RFC 5322 simplified `local@domain.tld` | — | `[REDACTED:EMAIL:CC6.1]` |
+| Phone (US) | 10-digit with optional `+1` country code | — | `[REDACTED:PHONE:CC6.1]` |
+| IPv4 | Dotted quad `N.N.N.N` | Octet range 0–255 | `[REDACTED:IP_ADDRESS:CC6.1]` |
+
+The `CC6.1` tag maps to SOC 2 Common Criteria control 6.1 (Logical and Physical Access Controls).
+
+### What Is Scanned
+
+Only natural-language content fields extracted from the request body:
+
+| Provider | Extracted paths |
+|---|---|
+| OpenAI | `messages[*].content` (string or multimodal array) |
+| Anthropic | `system` (string or content block array), `messages[*].content` |
+| SSE streams | Delta content concatenated per choice/block before scanning |
+
+### What Is NOT Scanned
+
+- **Structural JSON fields**: model names, token counts, IDs (`workspace_id`, `request_id`), temperature, and all other configuration parameters. This is by design — scanning structural fields produces false positives (e.g., a 16-digit workspace ID triggering credit card detection).
+- **HTTP headers**: Authorization tokens, cookies, custom headers.
+- **URL paths and query parameters**.
+- **Response bodies** (future work).
+
+### What Is NOT Caught
+
+Pattern-based redaction (`redaction_level: "pattern-based"`) catches structured PII with well-defined formats. It does **not** catch:
+
+- Names mentioned in prose
+- Street addresses
+- Medical information
+- Company-proprietary data
+- Any unstructured PII without a recognizable pattern
+
+A future `"nlp-based"` redaction level will address unstructured PII categories.
+
 ## Architecture
 
 - `httputil.ReverseProxy` with `Rewrite` (not deprecated `Director`)
 - `http.Transport` configured for HTTP/2 (`ForceAttemptHTTP2`), connection pooling (1000 idle / 100 per host), and transparent compression passthrough
 - `sync.Pool` buffer pool to reduce GC pressure (32KB buffers)
 - SSE auto-detection: stdlib flushes immediately for `text/event-stream` and chunked responses
-- Zero external dependencies -- stdlib only
+- Audit pipeline: TeeReader → ring buffer → session assembler → worker pool (extract + redact + hash) → double-buffered collector
+
+## Versioning
+
+Build version is injected at compile time via ldflags:
+
+```bash
+go build -ldflags "-X main.version=v1.2.3" -o outband .
+```
+
+The Docker build accepts a `VERSION` build arg:
+
+```bash
+docker build --build-arg VERSION=v1.2.3 --target proxy -t outband:v1.2.3 .
+```
+
+Check the running version:
+
+```bash
+./outband --version
+```
+
+Every telemetry log entry includes a `version` field so auditors can trace which sidecar version generated each record. Entries from different versions are forward-compatible.
+
+### Upgrade Process
+
+1. Pull the new image: `docker pull outband:v1.1.0`
+2. Restart the container (or update the K8s deployment image tag)
+3. Verify with `/healthz` — returns 200 once the proxy is listening and upstream is reachable
+4. Verify with `/readyz` — returns 200 once the audit pipeline is initialized
+5. Confirm telemetry entries show the new `version` field
 
 ## Tests
 
@@ -148,11 +247,6 @@ Inter-chunk latency percentiles (n~10,000):
 go test -v            # functional tests
 go test -bench=. -v   # benchmarks
 ```
-
-7 functional tests cover:
-- Header transparency (no User-Agent leak, no X-Forwarded injection, auth preservation, hop-by-hop suppression)
-- Protocol fidelity (SSE boundary preservation, 50MB streaming upload, query string verbatim)
-- Lifecycle (upstream timeout, mid-stream disconnect propagation, error passthrough)
 
 ## License
 

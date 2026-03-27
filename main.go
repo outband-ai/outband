@@ -15,6 +15,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -24,6 +25,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -90,6 +92,59 @@ func newProxy(cfg proxyConfig) *httputil.ReverseProxy {
 	}
 }
 
+// version is set at build time via ldflags:
+//
+//	go build -ldflags "-X main.version=v1.2.3" -o outband .
+var version = "dev"
+
+// validateFlags checks all numeric and duration flags for invalid values.
+// Returns a slice of human-readable error strings (empty if valid).
+func validateFlags(
+	auditCapacity, auditBlockSize, auditQueueSize int,
+	maxPayloadSize, workerQueueSize, numWorkers int,
+	collectorQueueSize, batchSize int,
+	dropPollInterval, staleTimeout, flushInterval time.Duration,
+) []string {
+	var errs []string
+	if auditCapacity < 0 {
+		errs = append(errs, "--audit-capacity must be >= 0")
+	}
+	if auditBlockSize <= 0 {
+		errs = append(errs, "--audit-block-size must be > 0")
+	}
+	if auditQueueSize <= 0 {
+		errs = append(errs, "--audit-queue-size must be > 0")
+	}
+	if maxPayloadSize <= 0 {
+		errs = append(errs, "--max-payload-size must be > 0")
+	}
+	if workerQueueSize <= 0 {
+		errs = append(errs, "--worker-queue-size must be > 0")
+	}
+	if numWorkers <= 0 {
+		errs = append(errs, "--workers must be > 0")
+	}
+	if collectorQueueSize <= 0 {
+		errs = append(errs, "--collector-queue-size must be > 0")
+	}
+	if batchSize <= 0 {
+		errs = append(errs, "--batch-size must be > 0")
+	}
+	if dropPollInterval <= 0 {
+		errs = append(errs, "--drop-poll-interval must be > 0")
+	}
+	if staleTimeout <= 0 {
+		errs = append(errs, "--stale-timeout must be > 0")
+	}
+	if flushInterval <= 0 {
+		errs = append(errs, "--flush-interval must be > 0")
+	}
+	if auditCapacity > 0 && auditBlockSize > 0 && auditBlockSize > auditCapacity {
+		errs = append(errs, "--audit-block-size must be <= --audit-capacity")
+	}
+	return errs
+}
+
 func main() {
 	target := flag.String("target", "", "upstream API URL (e.g., https://api.openai.com)")
 	listen := flag.String("listen", "localhost:8080", "address to listen on")
@@ -97,7 +152,21 @@ func main() {
 	auditBlockSize := flag.Int("audit-block-size", defaultBlockSize, "audit buffer block size in bytes")
 	auditQueueSize := flag.Int("audit-queue-size", defaultQueueSize, "audit queue slot count")
 	dropPollInterval := flag.Duration("drop-poll-interval", defaultDropPollInterval, "interval for polling drop counter")
+	apiFormat := flag.String("api-format", "", "API payload format: openai, anthropic (auto-detected from --target if omitted)")
+	maxPayloadSize := flag.Int("max-payload-size", defaultMaxPayloadSize, "per-request payload size limit in bytes")
+	staleTimeout := flag.Duration("stale-timeout", defaultStaleTimeout, "staleness timeout for incomplete payloads")
+	workerQueueSize := flag.Int("worker-queue-size", defaultWorkerQueueSize, "channel buffer size between assembler and workers")
+	numWorkers := flag.Int("workers", runtime.GOMAXPROCS(0), "number of redaction worker goroutines")
+	collectorQueueSize := flag.Int("collector-queue-size", defaultCollectorQueueSize, "channel buffer size between workers and collector")
+	batchSize := flag.Int("batch-size", defaultBatchSize, "collector batch size before flush")
+	flushInterval := flag.Duration("flush-interval", defaultFlushInterval, "collector flush interval")
+	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	if *target == "" {
 		fmt.Fprintln(os.Stderr, "error: --target is required")
@@ -114,10 +183,29 @@ func main() {
 		log.Fatalf("target URL must have http or https scheme, got %q", targetURL.Scheme)
 	}
 
+	if *apiFormat != "" && parseAPIFormat(*apiFormat) == apiTypeUnknown {
+		fmt.Fprintf(os.Stderr, "error: unrecognized --api-format %q (valid: openai, anthropic)\n", *apiFormat)
+		os.Exit(1)
+	}
+
+	if errs := validateFlags(
+		*auditCapacity, *auditBlockSize, *auditQueueSize,
+		*maxPayloadSize, *workerQueueSize, *numWorkers,
+		*collectorQueueSize, *batchSize,
+		*dropPollInterval, *staleTimeout, *flushInterval,
+	); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintln(os.Stderr, "error:", e)
+		}
+		os.Exit(1)
+	}
+
 	cfg := proxyConfig{targetURL: targetURL}
 
+	var ready atomic.Bool
 	var auditQueue chan *auditBlock
 	var stopPoller func()
+	var waitPipeline func()
 	if *auditCapacity > 0 {
 		pool := newBlockPool(*auditCapacity, *auditBlockSize)
 		auditQueue = make(chan *auditBlock, *auditQueueSize)
@@ -126,21 +214,82 @@ func main() {
 		cfg.auditQueue = auditQueue
 		cfg.drops = drops
 		cfg.nextReqID = &atomic.Uint64{}
+
+		// Determine API type: explicit flag overrides URL heuristic.
+		apiT := parseAPIFormat(*apiFormat)
+		if apiT == apiTypeUnknown {
+			apiT = detectAPIType(targetURL)
+		}
+
+		// Pipeline channels.
+		workerInput := make(chan *assembledPayload, *workerQueueSize)
+		resultsChannel := make(chan *telemetryLog, *collectorQueueSize)
+
+		// Stage 1: Assembler.
+		var asmStats assemblerStats
+		assemblerDone := make(chan struct{})
 		go func() {
-			for blk := range auditQueue {
-				pool.put(blk)
-			}
+			defer close(assemblerDone)
+			startAssembler(auditQueue, assemblerConfig{
+				maxPayloadSize: *maxPayloadSize,
+				staleTimeout:   *staleTimeout,
+				workerInput:    workerInput,
+				pool:           pool,
+				apiType:        apiT,
+			}, &asmStats)
 		}()
+
+		// Stage 2: Workers.
+		chain := &RedactorChain{redactors: []Redactor{NewRegexRedactor()}}
+		var wkStats workerStats
+		waitWorkers := startWorkers(*numWorkers, workerInput, resultsChannel, chain, &wkStats)
+
+		// Stage 3: Collector.
+		var cStats collectorStats
+		collectorDone := make(chan struct{})
+		logger := log.Default()
+		go func() {
+			defer close(collectorDone)
+			startCollector(collectorConfig{
+				batchSize:     *batchSize,
+				flushInterval: *flushInterval,
+				input:         resultsChannel,
+				flush: func(batch []*telemetryLog) {
+					for _, entry := range batch {
+						data, _ := json.Marshal(entry)
+						logger.Printf("TELEMETRY: %s", data)
+					}
+				},
+			}, &cStats)
+		}()
+
+		// Pipeline shutdown waiter: assembler → workers → collector.
+		waitPipeline = func() {
+			<-assemblerDone       // assembler finished, workerInput closed
+			waitWorkers()         // all workers finished
+			close(resultsChannel) // signal collector
+			<-collectorDone       // collector flushed and exited
+			log.Printf("pipeline stats: oversized_dropped=%d stale_dropped=%d worker_queue_full=%d budget_exceeded=%d result_dropped=%d flush_backlog=%d",
+				asmStats.oversizedDropped.Load(), asmStats.staleDropped.Load(),
+				asmStats.workerQueueFull.Load(), asmStats.budgetExceeded.Load(),
+				wkStats.resultDropped.Load(), cStats.flushBacklog.Load())
+		}
+
 		stopPoller = startDropPoller(context.Background(), drops, *dropPollInterval, log.Default())
-		log.Printf("audit capture enabled: pool=%dMB, block=%dKB, queue=%d",
-			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize)
+		ready.Store(true)
+		log.Printf("audit pipeline enabled: pool=%dMB, block=%dKB, queue=%d, workers=%d",
+			*auditCapacity/(1024*1024), *auditBlockSize/1024, *auditQueueSize, *numWorkers)
+	} else {
+		// No audit pipeline — ready immediately.
+		ready.Store(true)
 	}
 
 	proxy := newProxy(cfg)
+	handler := newHealthHandler(proxy, targetURL, &ready)
 
 	server := &http.Server{
 		Addr:    *listen,
-		Handler: proxy,
+		Handler: handler,
 	}
 
 	log.Printf("proxying %s -> %s", *listen, targetURL)
@@ -155,17 +304,25 @@ func main() {
 	<-sig
 
 	log.Println("shutting down")
+	ready.Store(false) // reject /readyz immediately so K8s stops routing traffic
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := server.Shutdown(ctx); err != nil {
-		log.Fatal(err)
+	shutdownErr := server.Shutdown(ctx)
+	if shutdownErr != nil {
+		log.Printf("server shutdown error: %v", shutdownErr)
 	}
-	// Close audit queue after server shutdown so in-flight auditReaders
-	// do not panic sending to a closed channel.
+	// Always drain the pipeline regardless of Shutdown outcome so the
+	// collector flushes any buffered telemetry before exit.
 	if auditQueue != nil {
 		close(auditQueue)
 	}
+	if waitPipeline != nil {
+		waitPipeline()
+	}
 	if stopPoller != nil {
 		stopPoller()
+	}
+	if shutdownErr != nil {
+		os.Exit(1)
 	}
 }
