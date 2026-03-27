@@ -19,6 +19,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // mockDropRecorder counts drop() calls for test assertions.
@@ -28,9 +29,11 @@ type mockDropRecorder struct {
 
 func (m *mockDropRecorder) drop() { m.count.Add(1) }
 
-// collectBlocks drains the queue into a slice.
+// collectBlocks drains the queue into a slice. It uses a short timeout
+// after the initial non-blocking drain to catch blocks from async producers.
 func collectBlocks(queue <-chan *auditBlock) []*auditBlock {
 	var out []*auditBlock
+	timeout := time.After(50 * time.Millisecond)
 	for {
 		select {
 		case blk, ok := <-queue:
@@ -38,7 +41,7 @@ func collectBlocks(queue <-chan *auditBlock) []*auditBlock {
 				return out
 			}
 			out = append(out, blk)
-		default:
+		case <-timeout:
 			return out
 		}
 	}
@@ -133,7 +136,9 @@ func TestAuditReaderEOF(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data"))
 	ar := newAuditReader(body, pool, &mockDropRecorder{}, queue, 99)
 
-	io.ReadAll(ar)
+	if _, err := io.ReadAll(ar); err != nil {
+		t.Fatal(err)
+	}
 	ar.Close()
 
 	blocks := collectBlocks(queue)
@@ -340,12 +345,16 @@ func TestAuditReaderRequestIDUnique(t *testing.T) {
 
 	body1 := io.NopCloser(strings.NewReader("request one"))
 	ar1 := newAuditReader(body1, pool, drops, queue, 100)
-	io.ReadAll(ar1)
+	if _, err := io.ReadAll(ar1); err != nil {
+		t.Fatalf("io.ReadAll(ar1) failed: %v", err)
+	}
 	ar1.Close()
 
 	body2 := io.NopCloser(strings.NewReader("request two"))
 	ar2 := newAuditReader(body2, pool, drops, queue, 101)
-	io.ReadAll(ar2)
+	if _, err := io.ReadAll(ar2); err != nil {
+		t.Fatalf("io.ReadAll(ar2) failed: %v", err)
+	}
 	ar2.Close()
 
 	blocks := collectBlocks(queue)

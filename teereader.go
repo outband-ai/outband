@@ -140,7 +140,14 @@ func (a *auditReader) capture(data []byte) {
 }
 
 // sendBlock performs a non-blocking send of a block to the audit queue.
-func (a *auditReader) sendBlock(blk *auditBlock) bool {
+// It recovers from panics caused by sending on a closed channel during
+// server shutdown, treating them as a failed send.
+func (a *auditReader) sendBlock(blk *auditBlock) (ok bool) {
+	defer func() {
+		if recover() != nil {
+			ok = false
+		}
+	}()
 	select {
 	case a.queue <- blk:
 		return true
@@ -185,6 +192,9 @@ func (a *auditReader) finish() {
 	a.current.final = true
 	if !a.sendBlock(a.current) {
 		a.pool.put(a.current)
+		if a.drops != nil {
+			a.drops.drop()
+		}
 	}
 	a.current = nil
 }

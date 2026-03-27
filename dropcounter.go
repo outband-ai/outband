@@ -75,5 +75,10 @@ func startDropPoller(ctx context.Context, dc *dropCounter, interval time.Duratio
 	return func() {
 		cancel()
 		<-done
+		// Flush any drops that accumulated since the last tick.
+		n, total := dc.poll()
+		if n > 0 {
+			logger.Printf("WARN: Dropped %d payloads in last %s due to audit buffer pressure (total: %d)", n, interval, total)
+		}
 	}
 }
