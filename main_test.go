@@ -363,14 +363,17 @@ func TestUpstreamDisconnectMidStream(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	// Read should encounter an error -- the proxy should propagate the disconnect
+	// Read should encounter an error or return truncated data -- the proxy
+	// must propagate the disconnect, not hang or fabricate a complete response.
 	body, err := io.ReadAll(resp.Body)
-	// Either we get an error, or we get partial data (both are acceptable --
-	// the key invariant is that the proxy does NOT hang).
-	if err == nil && string(body) == `{"data": "partial_response"}` {
-		t.Error("proxy returned a complete fabricated response instead of propagating the disconnect")
+	if err != nil {
+		// Read error means the proxy correctly propagated the disconnect.
+		return
 	}
-	// If we got here (with or without error), the proxy didn't hang. Pass.
+	// No read error -- verify we got the truncated data, not something fabricated.
+	if string(body) != `{"data": "par` {
+		t.Errorf("expected truncated body %q, got %q", `{"data": "par`, string(body))
+	}
 }
 
 func TestErrorPassthrough(t *testing.T) {
@@ -401,11 +404,6 @@ func TestErrorPassthrough(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Benchmarks
 // ---------------------------------------------------------------------------
-
-const (
-	benchSequentialRequests = 500
-	benchConcurrentMinReqs  = 10000
-)
 
 func gcStats() runtime.MemStats {
 	var m runtime.MemStats
@@ -439,53 +437,80 @@ func BenchmarkProxySequential(b *testing.B) {
 	defer upstream.Close()
 
 	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(upstreamURL)
-	proxyServer := httptest.NewServer(proxy)
-	defer proxyServer.Close()
 
-	// Warmup
-	http.Get(upstream.URL + "/v1/chat/completions")
-	http.Get(proxyServer.URL + "/v1/chat/completions")
+	b.Run("direct", func(b *testing.B) {
+		b.SetBytes(int64(len(chatCompletionResponse)))
 
-	directLatencies := make([]time.Duration, benchSequentialRequests)
-	proxyLatencies := make([]time.Duration, benchSequentialRequests)
-
-	before := gcStats()
-
-	for i := range benchSequentialRequests {
-		start := time.Now()
-		resp, err := http.Get(upstream.URL + "/v1/chat/completions")
-		if err != nil {
-			b.Fatal(err)
+		// Warmup
+		resp, _ := http.Get(upstream.URL + "/v1/chat/completions")
+		if resp != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		directLatencies[i] = time.Since(start)
-	}
 
-	for i := range benchSequentialRequests {
-		start := time.Now()
-		resp, err := http.Get(proxyServer.URL + "/v1/chat/completions")
-		if err != nil {
-			b.Fatal(err)
+		before := gcStats()
+		latencies := make([]time.Duration, b.N)
+
+		b.ResetTimer()
+		for i := range b.N {
+			start := time.Now()
+			resp, err := http.Get(upstream.URL + "/v1/chat/completions")
+			if err != nil {
+				b.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			latencies[i] = time.Since(start)
 		}
-		io.Copy(io.Discard, resp.Body)
-		resp.Body.Close()
-		proxyLatencies[i] = time.Since(start)
-	}
+		b.StopTimer()
 
-	after := gcStats()
-	logGCDelta(b, "sequential", before, after, benchSequentialRequests*2)
+		after := gcStats()
+		logGCDelta(b, "direct-sequential", before, after, b.N)
 
-	slices.Sort(directLatencies)
-	slices.Sort(proxyLatencies)
+		slices.Sort(latencies)
+		for _, p := range []float64{50, 95, 99} {
+			b.Logf("p%.0f: %v (n=%d)", p, percentile(latencies, p), b.N)
+		}
+	})
 
-	for _, p := range []float64{50, 95, 99} {
-		d := percentile(directLatencies, p)
-		px := percentile(proxyLatencies, p)
-		overhead := px - d
-		b.Logf("p%.0f: direct=%v proxied=%v overhead=%v", p, d, px, overhead)
-	}
+	b.Run("proxied", func(b *testing.B) {
+		proxy := newProxy(upstreamURL)
+		proxyServer := httptest.NewServer(proxy)
+		defer proxyServer.Close()
+
+		b.SetBytes(int64(len(chatCompletionResponse)))
+
+		// Warmup
+		resp, _ := http.Get(proxyServer.URL + "/v1/chat/completions")
+		if resp != nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+
+		before := gcStats()
+		latencies := make([]time.Duration, b.N)
+
+		b.ResetTimer()
+		for i := range b.N {
+			start := time.Now()
+			resp, err := http.Get(proxyServer.URL + "/v1/chat/completions")
+			if err != nil {
+				b.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			latencies[i] = time.Since(start)
+		}
+		b.StopTimer()
+
+		after := gcStats()
+		logGCDelta(b, "proxied-sequential", before, after, b.N)
+
+		slices.Sort(latencies)
+		for _, p := range []float64{50, 95, 99} {
+			b.Logf("p%.0f: %v (n=%d)", p, percentile(latencies, p), b.N)
+		}
+	})
 }
 
 func BenchmarkProxyConcurrent(b *testing.B) {
@@ -577,10 +602,9 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 
 func BenchmarkProxyStreaming(b *testing.B) {
 	const (
-		numChunks      = 50
-		chunkInterval  = 5 * time.Millisecond
-		initialDelay   = 75 * time.Millisecond
-		numClients     = 50
+		numChunks     = 50
+		chunkInterval = 5 * time.Millisecond
+		initialDelay  = 75 * time.Millisecond
 	)
 
 	// Build a realistic SSE chunk
@@ -618,7 +642,7 @@ func BenchmarkProxyStreaming(b *testing.B) {
 	}
 
 	// Measure inter-chunk latencies for a single SSE stream
-	measureStream := func(targetURL string) []time.Duration {
+	measureStream := func(b *testing.B, targetURL string) []time.Duration {
 		resp, err := http.Get(targetURL + "/v1/chat/completions")
 		if err != nil {
 			b.Error(err)
@@ -662,11 +686,11 @@ func BenchmarkProxyStreaming(b *testing.B) {
 			var allDeltas []time.Duration
 			var wg sync.WaitGroup
 
-			for range numClients {
+			for range b.N {
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					deltas := measureStream(targetURL)
+					deltas := measureStream(b, targetURL)
 					mu.Lock()
 					allDeltas = append(allDeltas, deltas...)
 					mu.Unlock()
@@ -675,7 +699,7 @@ func BenchmarkProxyStreaming(b *testing.B) {
 			wg.Wait()
 
 			after := gcStats()
-			logGCDelta(b, tc.name+"-streaming", before, after, numClients)
+			logGCDelta(b, tc.name+"-streaming", before, after, b.N)
 
 			slices.Sort(allDeltas)
 			for _, p := range []float64{50, 95, 99} {
