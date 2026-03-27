@@ -14,6 +14,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"log"
@@ -22,7 +23,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"os/signal"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -102,7 +105,20 @@ func main() {
 	}
 
 	log.Printf("proxying %s -> %s", *listen, targetURL)
-	if err := server.ListenAndServe(); err != nil {
+	go func() {
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal(err)
+		}
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+	<-sig
+
+	log.Println("shutting down")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := server.Shutdown(ctx); err != nil {
 		log.Fatal(err)
 	}
 }

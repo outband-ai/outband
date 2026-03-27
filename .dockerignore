@@ -1,0 +1,9 @@
+outband
+*.exe
+*.test
+*.out
+*.prof
+.git
+.idea
+.vscode
+.claude
