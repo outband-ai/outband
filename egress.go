@@ -174,12 +174,14 @@ func (t *WebhookTarget) Push(ctx context.Context, summary *EvidenceSummary) erro
 		if err != nil {
 			return err
 		}
+		// Apply user headers first, then set reserved headers after so
+		// users cannot override Content-Type or Idempotency-Key.
+		for k, v := range t.headers {
+			req.Header.Set(k, v)
+		}
 		req.Header.Set("Content-Type", "application/json")
 		if idempotencyKey != "" {
 			req.Header.Set("Idempotency-Key", idempotencyKey)
-		}
-		for k, v := range t.headers {
-			req.Header.Set(k, v)
 		}
 
 		resp, err := t.client.Do(req)

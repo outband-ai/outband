@@ -14,6 +14,7 @@
 package main
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -122,7 +123,10 @@ func (a *Aggregator) computePercentile(target float64) int {
 	if a.latencySamples == 0 {
 		return 0
 	}
-	targetCount := uint64(float64(a.latencySamples) * target)
+	// Nearest-rank method: rank = ceil(N * p). Floor truncates and
+	// under-reports upper percentiles at small sample sizes (e.g., p99
+	// of 10 samples: floor gives rank 9 instead of correct rank 10).
+	targetCount := uint64(math.Ceil(float64(a.latencySamples) * target))
 	if targetCount == 0 {
 		targetCount = 1
 	}
@@ -153,20 +157,27 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 		catCopy[k] = v
 	}
 
-	// Use latencySamples as the total request count — it is incremented in
-	// RecordLatency for every request that transits the proxy (including
-	// bodiless GETs that never enter the audit pipeline). audited+dropped
-	// would miss those, understating total traffic.
-	processed := a.latencySamples
+	// TotalRequestsProcessed = latencySamples: all traffic through the proxy
+	// including bodiless GETs that never enter the audit pipeline.
+	//
+	// AuditCoveragePercent uses audited/(audited+dropped) — both counters
+	// from the same lifecycle phase (flush-time for audited, drop-time for
+	// dropped). latencySamples is ingress-counted and would introduce
+	// cross-window skew: a request entering at T=59:59 gets audited at
+	// T=00:01 in the next window. Using same-phase counters avoids this.
+	// Coverage answers "of requests that could be audited (had a body),
+	// what percentage were?" — bodiless requests are excluded from the
+	// ratio because there is nothing to audit.
+	auditable := a.requestsAudited + droppedCount
 	var coverage float64
-	if processed > 0 {
-		coverage = float64(a.requestsAudited) / float64(processed) * 100
+	if auditable > 0 {
+		coverage = float64(a.requestsAudited) / float64(auditable) * 100
 	}
 
 	summary := &EvidenceSummary{
 		WindowStart:            a.windowStart,
 		WindowEnd:              now,
-		TotalRequestsProcessed: processed,
+		TotalRequestsProcessed: a.latencySamples,
 		TotalRequestsAudited:   a.requestsAudited,
 		TotalRequestsDropped:   droppedCount,
 		AuditCoveragePercent:   coverage,

@@ -218,7 +218,8 @@ func TestAggregatorDeepCopy(t *testing.T) {
 func TestAggregatorCoverage(t *testing.T) {
 	agg := NewAggregator("test")
 
-	// 10 total requests (latencySamples), 7 audited = 70% coverage.
+	// 10 total requests (latencySamples), 7 audited, 3 dropped.
+	// coverage = audited / (audited + dropped) = 7 / 10 = 70%.
 	for i := 0; i < 10; i++ {
 		agg.RecordLatency(1 * time.Millisecond)
 	}
@@ -240,7 +241,7 @@ func TestAggregatorCoverage(t *testing.T) {
 func TestAggregatorCoverageFullAudit(t *testing.T) {
 	agg := NewAggregator("test")
 
-	// 5 total requests, 5 audited = 100% coverage.
+	// 5 total, 5 audited, 0 dropped. coverage = 5 / (5+0) = 100%.
 	for i := 0; i < 5; i++ {
 		agg.RecordLatency(1 * time.Millisecond)
 	}

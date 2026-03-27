@@ -155,6 +155,12 @@ func (w *JSONLWriter) rotate() error {
 	oldPath := filepath.Join(w.dir, activeFileName)
 	newPath := filepath.Join(w.dir, rotatedPrefix+ts+rotatedSuffix)
 	if err := os.Rename(oldPath, newPath); err != nil {
+		// Rename failed — reopen the active file so w.file is not a
+		// closed descriptor. Subsequent Flush calls will still work.
+		f, reopenErr := os.OpenFile(oldPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		if reopenErr == nil {
+			w.file = f
+		}
 		return err
 	}
 
