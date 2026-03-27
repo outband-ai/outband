@@ -61,6 +61,13 @@ func newProxy(targetURL *url.URL) *httputil.ReverseProxy {
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(targetURL)
 			r.Out.URL.RawQuery = r.In.URL.RawQuery
+			// Go's Request.write() injects "User-Agent: Go-http-client/1.1"
+			// whenever the header is absent. To preserve transparency when
+			// the client sent no User-Agent, set an explicitly empty value
+			// which suppresses the default without sending a header on the wire.
+			if _, ok := r.In.Header["User-Agent"]; !ok {
+				r.Out.Header["User-Agent"] = []string{""}
+			}
 		},
 		Transport:  transport,
 		BufferPool: &bufferPool{},
