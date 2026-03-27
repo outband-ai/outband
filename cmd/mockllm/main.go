@@ -153,7 +153,11 @@ func main() {
 			listen = ":9090"
 		}
 		resp, err := http.Get("http://localhost" + listen + "/health")
-		if err != nil || resp.StatusCode != http.StatusOK {
+		if err != nil {
+			os.Exit(1)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
 			os.Exit(1)
 		}
 		os.Exit(0)
