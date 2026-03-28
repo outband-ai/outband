@@ -6,6 +6,7 @@ services:
       MOCK_CHUNK_DELAY: "30ms"
 
   proxy:
+    user: "${UID:-0}:${GID:-0}"
     command:
       - "--target"
       - "http://mockllm:9090"
