@@ -28,7 +28,7 @@ import (
 // ---------------------------------------------------------------------------
 
 var (
-	extractorRegistryMu sync.Mutex
+	extractorRegistryMu sync.RWMutex
 	extractorRegistry   = map[Direction]map[string]PayloadExtractor{}
 )
 
@@ -47,8 +47,8 @@ func RegisterExtractor(dir Direction, name string, ext PayloadExtractor) {
 // ExtractorForDirection returns the registered extractor for the given
 // direction and API format name, or nil if none is registered.
 func ExtractorForDirection(dir Direction, name string) PayloadExtractor {
-	extractorRegistryMu.Lock()
-	defer extractorRegistryMu.Unlock()
+	extractorRegistryMu.RLock()
+	defer extractorRegistryMu.RUnlock()
 	if m, ok := extractorRegistry[dir]; ok {
 		return m[name]
 	}

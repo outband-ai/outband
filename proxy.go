@@ -90,7 +90,7 @@ type ProxyConfig struct {
 	// Enterprise extension points for response capture.
 	ResponseCapture       bool
 	ResponseWriterFactory func(http.ResponseWriter, uint64) http.ResponseWriter
-	ResponseQueue         chan *AuditBlock
+	ResponseQueue         chan *AuditBlock // bidirectional because Run() both sends and closes during shutdown
 	ResponsePool          *BlockPool
 	ResponseDrops         *DropCounter
 }

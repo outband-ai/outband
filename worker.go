@@ -123,6 +123,21 @@ func processPayload(p *assembledPayload, chain *RedactorChain) *TelemetryLog {
 	}
 	sort.Strings(cats)
 
+	if p.direction == DirectionResponse {
+		return &TelemetryLog{
+			RequestID:               p.requestID,
+			Timestamp:               now,
+			Version:                 Version,
+			RedactionLevel:          chain.Name(),
+			FieldsScanned:           len(fields),
+			ResponseRedactedPayload: redactedPayload,
+			ResponseHash:            redactedHash,
+			ResponsePIICategories:   cats,
+			ResponseExtractorUsed:   extractorName(p.apiType),
+			ResponseCaptureComplete: p.complete,
+		}
+	}
+
 	return &TelemetryLog{
 		RequestID:          p.requestID,
 		Timestamp:          now,

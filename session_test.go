@@ -131,7 +131,7 @@ func TestSessionTracker_TTLEviction(t *testing.T) {
 		if got.ResponseCaptureComplete {
 			t.Fatal("evicted entry should have ResponseCaptureComplete=false")
 		}
-	case <-time.After(10 * time.Second):
+	case <-time.After(6 * time.Second):
 		t.Fatal("timeout waiting for TTL eviction")
 	}
 

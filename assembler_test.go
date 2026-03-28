@@ -29,8 +29,8 @@ func makeBlock(pool *BlockPool, requestID uint64, seq uint32, data []byte, final
 	blk.Seq = seq
 	blk.Final = final
 	blk.Abort = abort
-	copy(blk.Data, data)
-	blk.Used = len(data)
+	n := copy(blk.Data, data)
+	blk.Used = n
 	return blk
 }
 

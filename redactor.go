@@ -53,7 +53,9 @@ type RedactorChain struct {
 
 // NewRedactorChain creates a RedactorChain from the given redactors.
 func NewRedactorChain(redactors ...Redactor) *RedactorChain {
-	return &RedactorChain{redactors: redactors}
+	cp := make([]Redactor, len(redactors))
+	copy(cp, redactors)
+	return &RedactorChain{redactors: cp}
 }
 
 // Redact runs every redactor in order, deduplicating PII categories across
