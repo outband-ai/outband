@@ -67,6 +67,20 @@ func defaultMockHandler(bodyLog *syncBodyLog) http.Handler {
 			return
 		}
 
+		// Validate method and path — catch proxy rewrite regressions.
+		if r.URL.Path != "/v1/chat/completions" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "application/json" {
+			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
+			return
+		}
+
 		body, err := io.ReadAll(r.Body)
 		r.Body.Close()
 		if err != nil {
@@ -104,6 +118,15 @@ func slowStreamingMockHandler(bodyLog *syncBodyLog, chunkDelay time.Duration) ht
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/health" {
 			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		if r.URL.Path != "/v1/chat/completions" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -267,8 +290,8 @@ type integrationEnv struct {
 	jsonlPath   string
 
 	shutdownOnce       sync.Once
-	lastDropsReported  int64
-	lastIOErrsReported uint64
+	lastDropsReported  *int64
+	lastIOErrsReported *uint64
 	cfg                integrationConfig
 }
 
@@ -388,6 +411,8 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 	}
 
 	// Step 8: Evidence ticker.
+	// Offsets are shared between the ticker goroutine and gracefulShutdown
+	// via lastDropsReported/lastIOErrsReported to prevent double-counting.
 	var lastDropsReported int64
 	var lastIOErrsReported uint64
 	localJSON := NewLocalJSONTarget(evidenceDir)
@@ -455,26 +480,28 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 	ready.Store(true)
 
 	env := &integrationEnv{
-		upstream:       upstream,
-		metricsServer:  metricsServer,
-		server:         srv,
-		proxyURL:       "http://" + ln.Addr().String(),
-		metricsURL:     metricsServer.URL + "/metrics",
-		auditQueue:     auditQueue,
-		drops:          drops,
-		aggregator:     aggregator,
-		jsonlWriter:    jw,
-		ioErrors:       &ioErrors,
-		metrics:        metrics,
-		ready:          &ready,
-		receivedBodies: bodyLog,
-		waitPipeline:   waitPipeline,
-		tickerCancel:   tickerCancel,
-		tickerDone:     tickerDone,
-		logDir:         logDir,
-		evidenceDir:    evidenceDir,
-		jsonlPath:      filepath.Join(logDir, activeFileName),
-		cfg:            cfg,
+		upstream:           upstream,
+		metricsServer:      metricsServer,
+		server:             srv,
+		proxyURL:           "http://" + ln.Addr().String(),
+		metricsURL:         metricsServer.URL + "/metrics",
+		auditQueue:         auditQueue,
+		drops:              drops,
+		aggregator:         aggregator,
+		jsonlWriter:        jw,
+		ioErrors:           &ioErrors,
+		metrics:            metrics,
+		ready:              &ready,
+		receivedBodies:     bodyLog,
+		waitPipeline:       waitPipeline,
+		tickerCancel:       tickerCancel,
+		tickerDone:         tickerDone,
+		logDir:             logDir,
+		evidenceDir:        evidenceDir,
+		jsonlPath:          filepath.Join(logDir, activeFileName),
+		lastDropsReported:  &lastDropsReported,
+		lastIOErrsReported: &lastIOErrsReported,
+		cfg:                cfg,
 	}
 
 	t.Cleanup(func() { env.close() })
@@ -546,8 +573,8 @@ func (e *integrationEnv) gracefulShutdown(drainBudget time.Duration) {
 		}
 
 		// Final partial evidence report.
-		finalDrops := uint64(e.drops.total.Load() - e.lastDropsReported)
-		finalIOErrs := e.ioErrors.Load() - e.lastIOErrsReported
+		finalDrops := uint64(e.drops.total.Load() - *e.lastDropsReported)
+		finalIOErrs := e.ioErrors.Load() - *e.lastIOErrsReported
 		summary := e.aggregator.SnapshotAndReset(finalIOErrs, finalDrops, true, version)
 		localJSON := NewLocalJSONTarget(e.evidenceDir)
 		if err := localJSON.Push(context.Background(), summary); err != nil {
@@ -581,12 +608,18 @@ func sendIntegrationRequest(t *testing.T, client *http.Client, proxyURL, content
 	return resp
 }
 
-// sendAndDiscard sends a request and discards the response body.
+// sendAndDiscard sends a request, asserts a 2xx response, and discards the body.
 func sendAndDiscard(t *testing.T, client *http.Client, proxyURL, content string) {
 	t.Helper()
 	resp := sendIntegrationRequest(t, client, proxyURL, content)
-	io.Copy(io.Discard, resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("read response body: %v", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		t.Fatalf("unexpected status %d from %s: %s", resp.StatusCode, proxyURL, string(tailBytes(body, 200)))
+	}
 }
 
 // countAllJSONLEntries returns all .jsonl files in dir and their total parseable entry count.
@@ -722,26 +755,47 @@ func TestIntegrationPIITraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Match entries by expected redaction tags rather than positional index.
+	// Workers process concurrently so JSONL entry order is nondeterministic.
+	used := make([]bool, len(entries))
 	for i, tc := range cases {
-		entry := entries[i]
-		catSet := make(map[string]bool)
-		for _, c := range entry.PIICategoriesFound {
-			catSet[c] = true
-		}
-		for _, want := range tc.wantCats {
-			if !catSet[want] {
-				t.Errorf("case %d: missing category %q in %v", i, want, entry.PIICategoriesFound)
+		found := false
+		for j, entry := range entries {
+			if used[j] {
+				continue
 			}
-		}
-		for _, tag := range tc.wantTags {
-			if !strings.Contains(entry.RedactedPayload, tag) {
-				t.Errorf("case %d: missing tag %q in payload", i, tag)
+			// Match: entry must contain all expected redaction tags.
+			match := true
+			for _, tag := range tc.wantTags {
+				if !strings.Contains(entry.RedactedPayload, tag) {
+					match = false
+					break
+				}
 			}
-		}
-		for _, absent := range tc.absentText {
-			if strings.Contains(entry.RedactedPayload, absent) {
-				t.Errorf("case %d: PII %q not redacted in payload", i, absent)
+			if !match {
+				continue
 			}
+			used[j] = true
+			found = true
+
+			catSet := make(map[string]bool)
+			for _, c := range entry.PIICategoriesFound {
+				catSet[c] = true
+			}
+			for _, want := range tc.wantCats {
+				if !catSet[want] {
+					t.Errorf("case %d: missing category %q in %v", i, want, entry.PIICategoriesFound)
+				}
+			}
+			for _, absent := range tc.absentText {
+				if strings.Contains(entry.RedactedPayload, absent) {
+					t.Errorf("case %d: PII %q not redacted in payload", i, absent)
+				}
+			}
+			break
+		}
+		if !found {
+			t.Errorf("case %d: no matching entry found for tags %v", i, tc.wantTags)
 		}
 	}
 

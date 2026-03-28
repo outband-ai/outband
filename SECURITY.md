@@ -17,7 +17,7 @@ Outband runs in the same trust boundary as the application it proxies. It has ac
 - All LLM API traffic passing through the proxy, including request bodies and response bodies.
 - API keys passed in HTTP headers (e.g., `Authorization: Bearer sk-...`).
 
-This is inherent to the sidecar deployment model. If the sidecar is compromised, the application's API keys are already exposed at the same level. The sidecar does not introduce additional attack surface beyond what the application already has.
+This is inherent to the sidecar deployment model. If the sidecar is compromised, the application's API keys are already exposed at the same level. The sidecar does not expand the trust boundary, though it adds a new process and associated parser, configuration, and runtime surfaces.
 
 **Fail-open design:** If the audit pipeline experiences buffer pressure (ring buffer full, worker queue full), the proxy continues forwarding requests without blocking. Audit capture is dropped, not traffic. The drop counter tracks these events for compliance reporting.
 
@@ -26,7 +26,7 @@ This is inherent to the sidecar deployment model. If the sidecar is compromised,
 - **In memory only:** Raw request payloads are held in memory (ring buffer blocks, assembler reassembly buffers) during processing. They are never written to disk in raw form.
 - **Redaction before persistence:** PII is detected and redacted by the `RedactorChain` before any telemetry entry is written to disk. JSONL files contain redacted payloads only.
 - **Customer-controlled retention:** JSONL telemetry files and evidence summaries are written to the customer's own infrastructure. Retention is controlled via `--log-max-files` and `--log-max-age`.
-- **No data exfiltration:** No data is ever transmitted to Outband's infrastructure. The open-source build has no network calls to external services (webhook delivery is opt-in and configured by the customer).
+- **No default network egress:** By default, no data is transmitted to Outband's infrastructure. Customers may opt in to webhook delivery (`--webhook-url`), which transmits evidence summaries to an external endpoint when explicitly configured. The open-source build contains no hardcoded external service calls.
 
 ## Supported PII Categories and Limitations
 

@@ -99,6 +99,8 @@ echo ""
 echo -e "${BOLD}[SCENE 1] Starting sidecar proxy...${NC}"
 
 mkdir -p "$LOG_DIR" "$EVIDENCE_DIR"
+# Ensure volume mount directories are writable by container user (uid 65532).
+chmod 777 "$LOG_DIR" "$EVIDENCE_DIR"
 docker compose $COMPOSE_FILES build --quiet
 docker compose $COMPOSE_FILES up -d --wait --wait-timeout 60
 
