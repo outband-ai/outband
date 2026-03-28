@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"sync"
@@ -27,13 +27,13 @@ const (
 
 // flushFunc is the callback invoked with a batch of telemetry logs.
 // Implementations must be safe to call from a goroutine.
-type flushFunc func(batch []*telemetryLog)
+type flushFunc func(batch []*TelemetryLog)
 
 // collectorConfig holds tuning parameters for the collector.
 type collectorConfig struct {
 	batchSize     int
 	flushInterval time.Duration
-	input         <-chan *telemetryLog
+	input         <-chan *TelemetryLog
 	flush         flushFunc
 }
 
@@ -49,7 +49,7 @@ type collectorStats struct {
 //
 // Returns when input is closed and all remaining entries are flushed.
 func startCollector(cfg collectorConfig, stats *collectorStats) {
-	activeBatch := make([]*telemetryLog, 0, cfg.batchSize)
+	activeBatch := make([]*TelemetryLog, 0, cfg.batchSize)
 	var flushing atomic.Bool
 	var flushWg sync.WaitGroup
 
@@ -66,7 +66,7 @@ func startCollector(cfg collectorConfig, stats *collectorStats) {
 		}
 		// Swap: hand off activeBatch to the flush goroutine.
 		flushBatch := activeBatch
-		activeBatch = make([]*telemetryLog, 0, cfg.batchSize)
+		activeBatch = make([]*TelemetryLog, 0, cfg.batchSize)
 		flushing.Store(true)
 		flushWg.Add(1)
 		go func() {

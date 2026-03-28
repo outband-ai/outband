@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bytes"
@@ -271,8 +271,8 @@ type integrationEnv struct {
 	proxyURL      string
 	metricsURL    string
 
-	auditQueue chan *auditBlock
-	drops      *dropCounter
+	auditQueue chan *AuditBlock
+	drops      *DropCounter
 	aggregator *Aggregator
 	jsonlWriter *JSONLWriter
 	ioErrors   *atomic.Uint64
@@ -333,9 +333,9 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 	}
 
 	// Step 4: Create pipeline components.
-	pool := newBlockPool(cfg.poolCapacity, cfg.blockSize)
-	auditQueue := make(chan *auditBlock, cfg.queueSize)
-	drops := newDropCounter()
+	pool := NewBlockPool(cfg.poolCapacity, cfg.blockSize)
+	auditQueue := make(chan *AuditBlock, cfg.queueSize)
+	drops := NewDropCounter()
 	nextReqID := &atomic.Uint64{}
 
 	// Step 5: Isolated Prometheus registry.
@@ -359,7 +359,7 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 
 	// Step 7: Wire pipeline goroutines.
 	workerInput := make(chan *assembledPayload, 64)
-	resultsChannel := make(chan *telemetryLog, 128)
+	resultsChannel := make(chan *TelemetryLog, 128)
 
 	var asmStats assemblerStats
 	assemblerDone := make(chan struct{})
@@ -385,7 +385,7 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 			batchSize:     cfg.batchSize,
 			flushInterval: cfg.flushInterval,
 			input:         resultsChannel,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				written, err := jw.Flush(batch)
 				if err != nil {
 					ioErrors.Add(1)
@@ -429,13 +429,13 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 				if tickerCtx.Err() != nil {
 					return
 				}
-				currentDrops := drops.total.Load()
+				currentDrops := drops.Total.Load()
 				currentIOErrs := ioErrors.Load()
 				windowDrops := uint64(currentDrops - lastDropsReported)
 				windowIOErrs := currentIOErrs - lastIOErrsReported
 				lastDropsReported = currentDrops
 				lastIOErrsReported = currentIOErrs
-				summary := aggregator.SnapshotAndReset(windowIOErrs, windowDrops, false, version)
+				summary := aggregator.SnapshotAndReset(windowIOErrs, windowDrops, 0, false, Version)
 				if err := localJSON.Push(tickerCtx, summary); err != nil {
 					log.Printf("evidence dispatch error: %v", err)
 				}
@@ -448,13 +448,13 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 
 	// Step 9: Build proxy config.
 	var ready atomic.Bool
-	proxyCfg := proxyConfig{
-		targetURL:  targetURL,
-		auditPool:  pool,
-		auditQueue: auditQueue,
-		drops:      drops,
-		nextReqID:  nextReqID,
-		recordOverhead: func(d time.Duration) {
+	proxyCfg := ProxyConfig{
+		TargetURL:  targetURL,
+		AuditPool:  pool,
+		AuditQueue: auditQueue,
+		Drops:      drops,
+		NextReqID:  nextReqID,
+		RecordOverhead: func(d time.Duration) {
 			aggregator.RecordLatency(d)
 			metrics.proxyOverhead.Observe(d.Seconds())
 			metrics.requestsTotal.Inc()
@@ -462,7 +462,7 @@ func newIntegrationEnv(t *testing.T, opts ...integrationOption) *integrationEnv 
 	}
 
 	// Step 10–11: Create proxy handler.
-	proxy := newProxy(proxyCfg)
+	proxy := newProxy(&proxyCfg)
 	handler := newLatencyMiddleware(newHealthHandler(proxy, targetURL, &ready))
 
 	// Step 12: Start proxy on random port.
@@ -573,9 +573,9 @@ func (e *integrationEnv) gracefulShutdown(drainBudget time.Duration) {
 		}
 
 		// Final partial evidence report.
-		finalDrops := uint64(e.drops.total.Load() - *e.lastDropsReported)
+		finalDrops := uint64(e.drops.Total.Load() - *e.lastDropsReported)
 		finalIOErrs := e.ioErrors.Load() - *e.lastIOErrsReported
-		summary := e.aggregator.SnapshotAndReset(finalIOErrs, finalDrops, true, version)
+		summary := e.aggregator.SnapshotAndReset(finalIOErrs, finalDrops, 0, true, Version)
 		localJSON := NewLocalJSONTarget(e.evidenceDir)
 		if err := localJSON.Push(context.Background(), summary); err != nil {
 			log.Printf("final evidence write error: %v", err)
@@ -641,7 +641,7 @@ func countAllJSONLEntries(dir string) (files []string, totalEntries int) {
 			if len(line) == 0 {
 				continue
 			}
-			var entry telemetryLog
+			var entry TelemetryLog
 			if json.Unmarshal(line, &entry) == nil {
 				totalEntries++
 			}
@@ -934,18 +934,18 @@ func TestIntegrationDropCounter(t *testing.T) {
 	// Poll until pipeline settles: JSONL entries + drops == total.
 	err := waitForCondition(10*time.Second, 100*time.Millisecond, func() bool {
 		_, jsonlCount := countAllJSONLEntries(env.logDir)
-		drops := int(env.drops.total.Load())
+		drops := int(env.drops.Total.Load())
 		return jsonlCount+drops >= totalRequests
 	})
 	if err != nil {
 		_, jsonlCount := countAllJSONLEntries(env.logDir)
-		drops := env.drops.total.Load()
+		drops := env.drops.Total.Load()
 		t.Fatalf("pipeline did not settle: jsonl=%d drops=%d total=%d want=%d",
 			jsonlCount, drops, jsonlCount+int(drops), totalRequests)
 	}
 
 	// Drops must have occurred.
-	if got := env.drops.total.Load(); got == 0 {
+	if got := env.drops.Total.Load(); got == 0 {
 		t.Error("expected drops > 0 due to buffer pressure")
 	}
 }
@@ -1142,7 +1142,7 @@ func TestIntegrationGracefulShutdown(t *testing.T) {
 	if len(data) > 0 {
 		lines := bytes.Split(bytes.TrimSpace(data), []byte("\n"))
 		lastLine := lines[len(lines)-1]
-		var entry telemetryLog
+		var entry TelemetryLog
 		if err := json.Unmarshal(lastLine, &entry); err != nil {
 			t.Errorf("last JSONL line is not valid JSON: %v", err)
 		}

@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"context"
@@ -22,36 +22,36 @@ import (
 
 const defaultDropPollInterval = 5 * time.Second
 
-// dropCounter tracks audit capture abandonment events.
+// DropCounter tracks audit capture abandonment events.
 // The hot path (TeeReader) only touches atomic counters — zero I/O.
 // A background goroutine periodically polls and logs aggregate warnings.
-type dropCounter struct {
-	total    atomic.Int64 // monotonically increasing; included in compliance reports
-	interval atomic.Int64 // drops since last poll; reset by poller
+type DropCounter struct {
+	Total    atomic.Int64 // monotonically increasing; included in compliance reports
+	Interval atomic.Int64 // drops since last poll; reset by poller
 }
 
-func newDropCounter() *dropCounter {
-	return &dropCounter{}
+func NewDropCounter() *DropCounter {
+	return &DropCounter{}
 }
 
-// drop increments both counters. Called from the TeeReader hot path.
+// Increment increments both counters. Called from the TeeReader hot path.
 // Zero allocations, zero I/O.
-func (d *dropCounter) drop() {
-	d.total.Add(1)
-	d.interval.Add(1)
+func (d *DropCounter) Increment() {
+	d.Total.Add(1)
+	d.Interval.Add(1)
 }
 
-// poll returns the interval count (resetting it) and the monotonic total.
+// Poll returns the interval count (resetting it) and the monotonic total.
 // Called only by the background poller goroutine.
-func (d *dropCounter) poll() (intervalDrops, totalDrops int64) {
-	intervalDrops = d.interval.Swap(0)
-	totalDrops = d.total.Load()
+func (d *DropCounter) Poll() (intervalDrops, totalDrops int64) {
+	intervalDrops = d.Interval.Swap(0)
+	totalDrops = d.Total.Load()
 	return
 }
 
 // startDropPoller launches a background goroutine that logs aggregate
 // drop warnings. Returns a stop function for graceful shutdown.
-func startDropPoller(ctx context.Context, dc *dropCounter, interval time.Duration, logger *log.Logger) func() {
+func startDropPoller(ctx context.Context, dc *DropCounter, interval time.Duration, logger *log.Logger) func() {
 	ctx, cancel := context.WithCancel(ctx)
 	done := make(chan struct{})
 
@@ -62,7 +62,7 @@ func startDropPoller(ctx context.Context, dc *dropCounter, interval time.Duratio
 		for {
 			select {
 			case <-ticker.C:
-				n, total := dc.poll()
+				n, total := dc.Poll()
 				if n > 0 {
 					logger.Printf("WARN: Dropped %d payloads in last %s due to audit buffer pressure (total: %d)", n, interval, total)
 				}
@@ -76,7 +76,7 @@ func startDropPoller(ctx context.Context, dc *dropCounter, interval time.Duratio
 		cancel()
 		<-done
 		// Flush any drops that accumulated since the last tick.
-		n, total := dc.poll()
+		n, total := dc.Poll()
 		if n > 0 {
 			logger.Printf("WARN: Dropped %d payloads in last %s due to audit buffer pressure (total: %d)", n, interval, total)
 		}

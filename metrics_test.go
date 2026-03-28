@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"io"
@@ -28,7 +28,7 @@ import (
 
 func TestMetricsRegistration(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	dc := newDropCounter()
+	dc := NewDropCounter()
 	m := newMetrics(reg, dc)
 	if m == nil {
 		t.Fatal("newMetrics returned nil")
@@ -42,15 +42,15 @@ func TestMetricsRegistrationNilDropCounter(t *testing.T) {
 		t.Fatal("newMetrics returned nil")
 	}
 	if m.dropsCollector != nil {
-		t.Fatal("dropsCollector should be nil when dropCounter is nil")
+		t.Fatal("dropsCollector should be nil when DropCounter is nil")
 	}
 }
 
 func TestDropCollectorReadsAtomic(t *testing.T) {
-	dc := newDropCounter()
-	dc.drop()
-	dc.drop()
-	dc.drop()
+	dc := NewDropCounter()
+	dc.Increment()
+	dc.Increment()
+	dc.Increment()
 
 	reg := prometheus.NewRegistry()
 	collector := newDropCollector(dc)
@@ -62,8 +62,8 @@ func TestDropCollectorReadsAtomic(t *testing.T) {
 	}
 
 	// Drop more and verify it updates.
-	dc.drop()
-	dc.drop()
+	dc.Increment()
+	dc.Increment()
 	val = testutil.ToFloat64(collector)
 	if val != 5 {
 		t.Fatalf("drop collector after more drops: got %f, want 5", val)
@@ -123,8 +123,8 @@ func TestHistogramRecordsSubMs(t *testing.T) {
 
 func TestMetricsEndpoint(t *testing.T) {
 	reg := prometheus.NewRegistry()
-	dc := newDropCounter()
-	dc.drop()
+	dc := NewDropCounter()
+	dc.Increment()
 	newMetrics(reg, dc)
 
 	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{})

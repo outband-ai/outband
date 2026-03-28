@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"strings"
@@ -30,7 +30,7 @@ func TestRedactSSN(t *testing.T) {
 	if text != want {
 		t.Errorf("got %q, want %q", text, want)
 	}
-	assertCategory(t, cats, piiSSN)
+	assertCategory(t, cats, PIISSN)
 }
 
 func TestRedactCreditCardVisa(t *testing.T) {
@@ -39,7 +39,7 @@ func TestRedactCreditCardVisa(t *testing.T) {
 	if !strings.Contains(text, "[REDACTED:CC_NUMBER:CC6.1]") {
 		t.Errorf("Visa not redacted: %q", text)
 	}
-	assertCategory(t, cats, piiCC)
+	assertCategory(t, cats, PIICC)
 }
 
 func TestRedactCreditCardVisaWithSeparators(t *testing.T) {
@@ -71,7 +71,7 @@ func TestRedactEmail(t *testing.T) {
 	if text != want {
 		t.Errorf("got %q, want %q", text, want)
 	}
-	assertCategory(t, cats, piiEmail)
+	assertCategory(t, cats, PIIEmail)
 }
 
 func TestRedactEmailSubdomain(t *testing.T) {
@@ -109,7 +109,7 @@ func TestRedactIPv4(t *testing.T) {
 	if text != want {
 		t.Errorf("got %q, want %q", text, want)
 	}
-	assertCategory(t, cats, piiIPv4)
+	assertCategory(t, cats, PIIIPv4)
 }
 
 func TestRedactIPv4InvalidOctet(t *testing.T) {
@@ -197,9 +197,9 @@ func TestRedactorChainDeduplicatesCategories(t *testing.T) {
 		NewRegexRedactor(),
 		&mockRedactor{
 			name: "nlp-enhanced",
-			redactFunc: func(input string) (string, []piiCategory) {
+			redactFunc: func(input string) (string, []PIICategory) {
 				// Simulate NLP also flagging EMAIL on already-redacted text.
-				return input, []piiCategory{piiEmail}
+				return input, []PIICategory{PIIEmail}
 			},
 		},
 	}}
@@ -208,7 +208,7 @@ func TestRedactorChainDeduplicatesCategories(t *testing.T) {
 
 	emailCount := 0
 	for _, c := range cats {
-		if c == piiEmail {
+		if c == PIIEmail {
 			emailCount++
 		}
 	}
@@ -224,7 +224,7 @@ func TestRedactorChainSequential(t *testing.T) {
 		NewRegexRedactor(),
 		&mockRedactor{
 			name: "inspector",
-			redactFunc: func(input string) (string, []piiCategory) {
+			redactFunc: func(input string) (string, []PIICategory) {
 				secondSaw = input
 				return input, nil
 			},
@@ -244,10 +244,10 @@ func TestRedactorChainSequential(t *testing.T) {
 // mockRedactor is a test double that implements the Redactor interface.
 type mockRedactor struct {
 	name       string
-	redactFunc func(input string) (string, []piiCategory)
+	redactFunc func(input string) (string, []PIICategory)
 }
 
-func (m *mockRedactor) Redact(input string) (string, []piiCategory) {
+func (m *mockRedactor) Redact(input string) (string, []PIICategory) {
 	if m.redactFunc != nil {
 		return m.redactFunc(input)
 	}
@@ -346,7 +346,7 @@ func TestWorkspaceIDNotRedacted(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func assertCategory(t *testing.T, cats []piiCategory, want piiCategory) {
+func assertCategory(t *testing.T, cats []PIICategory, want PIICategory) {
 	t.Helper()
 	for _, c := range cats {
 		if c == want {

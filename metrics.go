@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"log"
@@ -39,7 +39,7 @@ type outbandMetrics struct {
 
 // newMetrics creates and registers all Prometheus metrics. The dropCounter
 // is read via a custom collector to avoid duplicate counting.
-func newMetrics(reg prometheus.Registerer, dc *dropCounter) *outbandMetrics {
+func newMetrics(reg prometheus.Registerer, dc *DropCounter) *outbandMetrics {
 	m := &outbandMetrics{
 		requestsTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "outband_requests_total",
@@ -96,10 +96,10 @@ func newMetrics(reg prometheus.Registerer, dc *dropCounter) *outbandMetrics {
 // dropCounter's atomic total. No duplicate counting, no drift.
 type dropCollector struct {
 	desc *prometheus.Desc
-	dc   *dropCounter
+	dc   *DropCounter
 }
 
-func newDropCollector(dc *dropCounter) *dropCollector {
+func newDropCollector(dc *DropCounter) *dropCollector {
 	return &dropCollector{
 		desc: prometheus.NewDesc(
 			"outband_requests_dropped_total",
@@ -118,7 +118,7 @@ func (c *dropCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.desc,
 		prometheus.CounterValue,
-		float64(c.dc.total.Load()),
+		float64(c.dc.Total.Load()),
 	)
 }
 

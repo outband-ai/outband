@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"sync"
@@ -21,14 +21,14 @@ import (
 
 func TestAggregatorIngest(t *testing.T) {
 	agg := NewAggregator("pattern-based")
-	batch := []*telemetryLog{
+	batch := []*TelemetryLog{
 		{PIICategoriesFound: []string{"SSN", "EMAIL"}},
 		{PIICategoriesFound: []string{"SSN"}},
 		{PIICategoriesFound: []string{"EMAIL", "PHONE"}},
 	}
 	agg.Ingest(batch)
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.TotalRequestsAudited != 3 {
 		t.Fatalf("audited: got %d, want 3", snap.TotalRequestsAudited)
 	}
@@ -55,13 +55,13 @@ func TestAggregatorRecordLatency(t *testing.T) {
 	agg.RecordLatency(99 * time.Millisecond)
 
 	// TotalRequestsProcessed = latencySamples = all proxied requests.
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.TotalRequestsProcessed != 4 {
 		t.Fatalf("processed: got %d, want 4", snap.TotalRequestsProcessed)
 	}
 
 	// After snapshot, counters should be zero.
-	snap2 := agg.SnapshotAndReset(0, 0, false, "test")
+	snap2 := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap2.TotalRequestsProcessed != 0 {
 		t.Fatalf("after reset: got %d, want 0", snap2.TotalRequestsProcessed)
 	}
@@ -74,7 +74,7 @@ func TestAggregatorComputePercentile(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		agg.RecordLatency(1 * time.Millisecond)
 	}
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.ProxyP50LatencyMS != 1 {
 		t.Fatalf("p50: got %d, want 1", snap.ProxyP50LatencyMS)
 	}
@@ -95,7 +95,7 @@ func TestAggregatorComputePercentileMixed(t *testing.T) {
 	}
 	agg.RecordLatency(50 * time.Millisecond)
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.ProxyP50LatencyMS != 1 {
 		t.Fatalf("p50: got %d, want 1", snap.ProxyP50LatencyMS)
 	}
@@ -116,7 +116,7 @@ func TestAggregatorLatencyOverflow(t *testing.T) {
 	agg.RecordLatency(100 * time.Millisecond) // overflow
 	agg.RecordLatency(200 * time.Millisecond) // overflow
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.TotalRequestsProcessed != 3 {
 		t.Fatalf("processed: got %d, want 3", snap.TotalRequestsProcessed)
 	}
@@ -129,11 +129,11 @@ func TestAggregatorSnapshotAndReset(t *testing.T) {
 	agg := NewAggregator("pattern-based")
 
 	agg.RecordLatency(2 * time.Millisecond)
-	agg.Ingest([]*telemetryLog{
+	agg.Ingest([]*TelemetryLog{
 		{PIICategoriesFound: []string{"SSN"}},
 	})
 
-	snap := agg.SnapshotAndReset(3, 5, true, "v1.0.0")
+	snap := agg.SnapshotAndReset(3, 5, 0, true, "v1.0.0")
 
 	// processed = latencySamples = 1 (one RecordLatency call)
 	if snap.TotalRequestsProcessed != 1 {
@@ -168,7 +168,7 @@ func TestAggregatorSnapshotAndReset(t *testing.T) {
 	}
 
 	// Verify reset.
-	snap2 := agg.SnapshotAndReset(0, 0, false, "v1.0.0")
+	snap2 := agg.SnapshotAndReset(0, 0, 0, false, "v1.0.0")
 	if snap2.TotalRequestsProcessed != 0 {
 		t.Fatalf("after reset, processed: got %d", snap2.TotalRequestsProcessed)
 	}
@@ -188,21 +188,21 @@ func TestAggregatorSnapshotAndReset(t *testing.T) {
 
 func TestAggregatorDeepCopy(t *testing.T) {
 	agg := NewAggregator("test")
-	agg.Ingest([]*telemetryLog{
+	agg.Ingest([]*TelemetryLog{
 		{PIICategoriesFound: []string{"SSN"}},
 	})
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 
 	// Mutate the returned map.
 	snap.RedactionEventsByCategory["SSN"] = 999
 	snap.RedactionEventsByCategory["INJECTED"] = 1
 
 	// Ingest new data and snapshot again — should be clean.
-	agg.Ingest([]*telemetryLog{
+	agg.Ingest([]*TelemetryLog{
 		{PIICategoriesFound: []string{"EMAIL"}},
 	})
-	snap2 := agg.SnapshotAndReset(0, 0, false, "test")
+	snap2 := agg.SnapshotAndReset(0, 0, 0, false, "test")
 
 	if snap2.RedactionEventsByCategory["SSN"] != 0 {
 		t.Fatalf("SSN leaked from mutated snapshot: got %d", snap2.RedactionEventsByCategory["SSN"])
@@ -223,13 +223,13 @@ func TestAggregatorCoverage(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		agg.RecordLatency(1 * time.Millisecond)
 	}
-	batch := make([]*telemetryLog, 7)
+	batch := make([]*TelemetryLog, 7)
 	for i := range batch {
-		batch[i] = &telemetryLog{}
+		batch[i] = &TelemetryLog{}
 	}
 	agg.Ingest(batch)
 
-	snap := agg.SnapshotAndReset(0, 3, false, "test")
+	snap := agg.SnapshotAndReset(0, 3, 0, false, "test")
 	if snap.TotalRequestsProcessed != 10 {
 		t.Fatalf("processed: got %d, want 10", snap.TotalRequestsProcessed)
 	}
@@ -245,13 +245,13 @@ func TestAggregatorCoverageFullAudit(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		agg.RecordLatency(1 * time.Millisecond)
 	}
-	batch := make([]*telemetryLog, 5)
+	batch := make([]*TelemetryLog, 5)
 	for i := range batch {
-		batch[i] = &telemetryLog{}
+		batch[i] = &TelemetryLog{}
 	}
 	agg.Ingest(batch)
 
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.AuditCoveragePercent != 100 {
 		t.Fatalf("coverage: got %f, want 100", snap.AuditCoveragePercent)
 	}
@@ -259,7 +259,7 @@ func TestAggregatorCoverageFullAudit(t *testing.T) {
 
 func TestAggregatorCoverageZeroProcessed(t *testing.T) {
 	agg := NewAggregator("test")
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.AuditCoveragePercent != 0 {
 		t.Fatalf("coverage with zero processed: got %f, want 0", snap.AuditCoveragePercent)
 	}
@@ -274,9 +274,9 @@ func TestAggregatorConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			batch := make([]*telemetryLog, 100)
+			batch := make([]*TelemetryLog, 100)
 			for j := range batch {
-				batch[j] = &telemetryLog{PIICategoriesFound: []string{"SSN"}}
+				batch[j] = &TelemetryLog{PIICategoriesFound: []string{"SSN"}}
 			}
 			agg.Ingest(batch)
 		}()
@@ -298,7 +298,7 @@ func TestAggregatorConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			snap := agg.SnapshotAndReset(0, 0, false, "test")
+			snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 			mu.Lock()
 			totalAudited += snap.TotalRequestsAudited
 			mu.Unlock()
@@ -308,7 +308,7 @@ func TestAggregatorConcurrency(t *testing.T) {
 	wg.Wait()
 
 	// Final snapshot to collect anything remaining.
-	finalSnap := agg.SnapshotAndReset(0, 0, false, "test")
+	finalSnap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	mu.Lock()
 	totalAudited += finalSnap.TotalRequestsAudited
 	mu.Unlock()
@@ -321,7 +321,7 @@ func TestAggregatorConcurrency(t *testing.T) {
 
 func TestAggregatorPercentileEmpty(t *testing.T) {
 	agg := NewAggregator("test")
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.ProxyP50LatencyMS != 0 {
 		t.Fatalf("p50 with no data: got %d, want 0", snap.ProxyP50LatencyMS)
 	}
@@ -330,10 +330,109 @@ func TestAggregatorPercentileEmpty(t *testing.T) {
 	}
 }
 
+func TestAggregatorResponseDropsNonZero(t *testing.T) {
+	agg := NewAggregator("test")
+
+	// Drops without any audited responses — response fields should still
+	// be populated because the guard is responsesAudited > 0 || drops > 0.
+	snap := agg.SnapshotAndReset(0, 0, 10, false, "test")
+	if snap.ResponseDrops != 10 {
+		t.Fatalf("response drops: got %d, want 10", snap.ResponseDrops)
+	}
+	if snap.TotalResponsesAudited != 0 {
+		t.Fatalf("responses audited: got %d, want 0", snap.TotalResponsesAudited)
+	}
+	if snap.ResponseRedactionEventsByCategory == nil {
+		t.Fatal("expected non-nil ResponseRedactionEventsByCategory when drops > 0")
+	}
+}
+
+func TestAggregatorResponseMetrics(t *testing.T) {
+	agg := NewAggregator("test")
+	batch := []*TelemetryLog{
+		{
+			PIICategoriesFound:    []string{"SSN"},
+			ResponseRedactedPayload: "redacted-response-1",
+			ResponsePIICategories:   []string{"EMAIL", "PHONE"},
+		},
+		{
+			PIICategoriesFound:    []string{"EMAIL"},
+			ResponseRedactedPayload: "redacted-response-2",
+			ResponsePIICategories:   []string{"SSN"},
+		},
+		{
+			PIICategoriesFound: []string{"CC_NUMBER"},
+			// No response payload — open-source request only.
+		},
+	}
+	agg.Ingest(batch)
+
+	snap := agg.SnapshotAndReset(0, 0, 2, false, "test")
+
+	if snap.TotalRequestsAudited != 3 {
+		t.Fatalf("requests audited: got %d, want 3", snap.TotalRequestsAudited)
+	}
+	if snap.TotalResponsesAudited != 2 {
+		t.Fatalf("responses audited: got %d, want 2", snap.TotalResponsesAudited)
+	}
+	if snap.ResponsePIIDetected != 3 {
+		t.Fatalf("response pii detected: got %d, want 3", snap.ResponsePIIDetected)
+	}
+	if snap.ResponseRedactionEventsByCategory["EMAIL"] != 1 {
+		t.Fatalf("response EMAIL: got %d, want 1", snap.ResponseRedactionEventsByCategory["EMAIL"])
+	}
+	if snap.ResponseRedactionEventsByCategory["PHONE"] != 1 {
+		t.Fatalf("response PHONE: got %d, want 1", snap.ResponseRedactionEventsByCategory["PHONE"])
+	}
+	if snap.ResponseRedactionEventsByCategory["SSN"] != 1 {
+		t.Fatalf("response SSN: got %d, want 1", snap.ResponseRedactionEventsByCategory["SSN"])
+	}
+	if snap.ResponseDrops != 2 {
+		t.Fatalf("response drops: got %d, want 2", snap.ResponseDrops)
+	}
+}
+
+func TestAggregatorResponseDeepCopy(t *testing.T) {
+	agg := NewAggregator("test")
+	agg.Ingest([]*TelemetryLog{
+		{
+			PIICategoriesFound:      []string{"SSN"},
+			ResponseRedactedPayload: "resp",
+			ResponsePIICategories:   []string{"EMAIL"},
+		},
+	})
+
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
+
+	// Mutate the returned response map.
+	snap.ResponseRedactionEventsByCategory["EMAIL"] = 999
+	snap.ResponseRedactionEventsByCategory["INJECTED"] = 1
+
+	// Ingest new data and snapshot again — should be clean.
+	agg.Ingest([]*TelemetryLog{
+		{
+			PIICategoriesFound:      []string{"CC_NUMBER"},
+			ResponseRedactedPayload: "resp2",
+			ResponsePIICategories:   []string{"PHONE"},
+		},
+	})
+	snap2 := agg.SnapshotAndReset(0, 0, 0, false, "test")
+
+	if snap2.ResponseRedactionEventsByCategory["EMAIL"] != 0 {
+		t.Fatalf("EMAIL leaked from mutated snapshot: got %d", snap2.ResponseRedactionEventsByCategory["EMAIL"])
+	}
+	if snap2.ResponseRedactionEventsByCategory["INJECTED"] != 0 {
+		t.Fatal("INJECTED key leaked from mutated snapshot")
+	}
+	if snap2.ResponseRedactionEventsByCategory["PHONE"] != 1 {
+		t.Fatalf("PHONE: got %d, want 1", snap2.ResponseRedactionEventsByCategory["PHONE"])
+	}
+}
+
 func TestAggregatorUptimeIncreases(t *testing.T) {
 	agg := NewAggregator("test")
 	time.Sleep(10 * time.Millisecond)
-	snap := agg.SnapshotAndReset(0, 0, false, "test")
+	snap := agg.SnapshotAndReset(0, 0, 0, false, "test")
 	if snap.SystemUptimeSeconds < 0.01 {
 		t.Fatalf("uptime too low: %f", snap.SystemUptimeSeconds)
 	}

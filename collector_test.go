@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"sync"
@@ -21,9 +21,9 @@ import (
 )
 
 func TestCollectorBatchFlush(t *testing.T) {
-	input := make(chan *telemetryLog, 100)
+	input := make(chan *TelemetryLog, 100)
 	var mu sync.Mutex
-	var flushed []*telemetryLog
+	var flushed []*TelemetryLog
 
 	stats := &collectorStats{}
 	done := make(chan struct{})
@@ -33,7 +33,7 @@ func TestCollectorBatchFlush(t *testing.T) {
 			batchSize:     5,
 			flushInterval: 10 * time.Second, // long timer — batch size triggers flush
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				mu.Lock()
 				flushed = append(flushed, batch...)
 				mu.Unlock()
@@ -43,7 +43,7 @@ func TestCollectorBatchFlush(t *testing.T) {
 
 	// Send exactly batchSize entries.
 	for i := range 5 {
-		input <- &telemetryLog{RequestID: uint64(i)}
+		input <- &TelemetryLog{RequestID: uint64(i)}
 	}
 
 	// Give the async flush goroutine time to complete.
@@ -59,9 +59,9 @@ func TestCollectorBatchFlush(t *testing.T) {
 }
 
 func TestCollectorTimerFlush(t *testing.T) {
-	input := make(chan *telemetryLog, 100)
+	input := make(chan *TelemetryLog, 100)
 	var mu sync.Mutex
-	var flushed []*telemetryLog
+	var flushed []*TelemetryLog
 
 	stats := &collectorStats{}
 	done := make(chan struct{})
@@ -71,7 +71,7 @@ func TestCollectorTimerFlush(t *testing.T) {
 			batchSize:     1000, // large — timer triggers flush
 			flushInterval: 50 * time.Millisecond,
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				mu.Lock()
 				flushed = append(flushed, batch...)
 				mu.Unlock()
@@ -81,7 +81,7 @@ func TestCollectorTimerFlush(t *testing.T) {
 
 	// Send fewer than batchSize entries.
 	for i := range 3 {
-		input <- &telemetryLog{RequestID: uint64(i)}
+		input <- &TelemetryLog{RequestID: uint64(i)}
 	}
 
 	// Wait for timer to tick and flush.
@@ -97,9 +97,9 @@ func TestCollectorTimerFlush(t *testing.T) {
 }
 
 func TestCollectorShutdown(t *testing.T) {
-	input := make(chan *telemetryLog, 100)
+	input := make(chan *TelemetryLog, 100)
 	var mu sync.Mutex
-	var flushed []*telemetryLog
+	var flushed []*TelemetryLog
 
 	stats := &collectorStats{}
 	done := make(chan struct{})
@@ -109,7 +109,7 @@ func TestCollectorShutdown(t *testing.T) {
 			batchSize:     1000,
 			flushInterval: 10 * time.Second,
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				mu.Lock()
 				flushed = append(flushed, batch...)
 				mu.Unlock()
@@ -119,7 +119,7 @@ func TestCollectorShutdown(t *testing.T) {
 
 	// Send entries and immediately close — final flush should catch them.
 	for i := range 7 {
-		input <- &telemetryLog{RequestID: uint64(i)}
+		input <- &TelemetryLog{RequestID: uint64(i)}
 	}
 	close(input)
 
@@ -137,7 +137,7 @@ func TestCollectorShutdown(t *testing.T) {
 }
 
 func TestCollectorDoubleBuffer(t *testing.T) {
-	input := make(chan *telemetryLog, 100)
+	input := make(chan *TelemetryLog, 100)
 	gate := make(chan struct{}) // blocks flush until released
 	var flushCount atomic.Int64
 
@@ -149,7 +149,7 @@ func TestCollectorDoubleBuffer(t *testing.T) {
 			batchSize:     3,
 			flushInterval: 50 * time.Millisecond,
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				flushCount.Add(1)
 				<-gate // block until test releases
 			},
@@ -158,13 +158,13 @@ func TestCollectorDoubleBuffer(t *testing.T) {
 
 	// Send first batch — triggers async flush that blocks on gate.
 	for i := range 3 {
-		input <- &telemetryLog{RequestID: uint64(i)}
+		input <- &TelemetryLog{RequestID: uint64(i)}
 	}
 	time.Sleep(100 * time.Millisecond)
 
 	// Send more entries while flush is blocked — they accumulate in activeBatch.
 	for i := range 3 {
-		input <- &telemetryLog{RequestID: uint64(10 + i)}
+		input <- &TelemetryLog{RequestID: uint64(10 + i)}
 	}
 	time.Sleep(100 * time.Millisecond)
 
@@ -186,7 +186,7 @@ func TestCollectorDoubleBuffer(t *testing.T) {
 }
 
 func TestCollectorFlushBackpressure(t *testing.T) {
-	input := make(chan *telemetryLog, 200)
+	input := make(chan *TelemetryLog, 200)
 	gate := make(chan struct{}) // blocks flush
 
 	stats := &collectorStats{}
@@ -197,20 +197,20 @@ func TestCollectorFlushBackpressure(t *testing.T) {
 			batchSize:     2,
 			flushInterval: 20 * time.Millisecond,
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				<-gate
 			},
 		}, stats)
 	}()
 
 	// Send first batch to trigger a blocking flush.
-	input <- &telemetryLog{RequestID: 1}
-	input <- &telemetryLog{RequestID: 2}
+	input <- &TelemetryLog{RequestID: 1}
+	input <- &TelemetryLog{RequestID: 2}
 	time.Sleep(50 * time.Millisecond)
 
 	// Send more batches while flush is blocked.
 	for i := range 10 {
-		input <- &telemetryLog{RequestID: uint64(10 + i)}
+		input <- &TelemetryLog{RequestID: uint64(10 + i)}
 	}
 	// Wait for timer ticks to attempt flushes.
 	time.Sleep(200 * time.Millisecond)

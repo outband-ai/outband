@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"strings"
@@ -22,13 +22,13 @@ import (
 
 // collectTelemetry runs the full pipeline (assembler → workers → collector)
 // and returns the collected telemetry logs.
-func collectTelemetry(t *testing.T, blocks []*auditBlock, apiType apiType) []*telemetryLog {
+func collectTelemetry(t *testing.T, blocks []*AuditBlock, apiType apiType) []*TelemetryLog {
 	t.Helper()
 
-	pool := newBlockPool(64*1024*20, 64*1024)
-	auditQueue := make(chan *auditBlock, 64)
+	pool := NewBlockPool(64*1024*20, 64*1024)
+	auditQueue := make(chan *AuditBlock, 64)
 	workerInput := make(chan *assembledPayload, 16)
-	resultsChannel := make(chan *telemetryLog, 64)
+	resultsChannel := make(chan *TelemetryLog, 64)
 
 	asmStats := &assemblerStats{}
 	assemblerDone := make(chan struct{})
@@ -47,7 +47,7 @@ func collectTelemetry(t *testing.T, blocks []*auditBlock, apiType apiType) []*te
 	waitWorkers := startWorkers(2, workerInput, resultsChannel, testChain(), wkStats)
 
 	var mu sync.Mutex
-	var collected []*telemetryLog
+	var collected []*TelemetryLog
 	cStats := &collectorStats{}
 	collectorDone := make(chan struct{})
 	go func() {
@@ -56,7 +56,7 @@ func collectTelemetry(t *testing.T, blocks []*auditBlock, apiType apiType) []*te
 			batchSize:     1000,
 			flushInterval: 50 * time.Millisecond,
 			input:         resultsChannel,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				mu.Lock()
 				collected = append(collected, batch...)
 				mu.Unlock()
@@ -84,11 +84,11 @@ func collectTelemetry(t *testing.T, blocks []*auditBlock, apiType apiType) []*te
 // TestEndToEndPipeline verifies the complete flow: blocks with PII go through
 // assembler → worker → collector and produce correct telemetry logs.
 func TestEndToEndPipeline(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
+	pool := NewBlockPool(64*1024*10, 64*1024)
 
 	payload := []byte(`{"messages":[{"role":"user","content":"My SSN is 123-45-6789 and email test@example.com"}]}`)
 
-	blocks := []*auditBlock{
+	blocks := []*AuditBlock{
 		makeBlock(pool, 1, 0, payload, true, false),
 	}
 
@@ -142,14 +142,14 @@ func TestEndToEndPipeline(t *testing.T) {
 // TestBlockBoundarySSNRedaction verifies that a SSN split across 3+ ring
 // buffer blocks is correctly reassembled and the SSN is detected and redacted.
 func TestBlockBoundarySSNRedaction(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
+	pool := NewBlockPool(64*1024*10, 64*1024)
 
 	// Split the payload so the SSN "123-45-6789" spans block boundaries.
 	part1 := []byte(`{"messages":[{"role":"user","content":"SSN: 123-`)
 	part2 := []byte(`45-67`)
 	part3 := []byte(`89 end"}]}`)
 
-	blocks := []*auditBlock{
+	blocks := []*AuditBlock{
 		makeBlock(pool, 1, 0, part1, false, false),
 		makeBlock(pool, 1, 1, part2, false, false),
 		makeBlock(pool, 1, 2, part3, true, false),
@@ -170,7 +170,7 @@ func TestBlockBoundarySSNRedaction(t *testing.T) {
 // TestWorkspaceIDNotRedactedE2E is the end-to-end version: a 16-digit Luhn-valid
 // workspace_id in a structural JSON field must NOT trigger credit card redaction.
 func TestWorkspaceIDNotRedactedE2E(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
+	pool := NewBlockPool(64*1024*10, 64*1024)
 
 	// 4532015112830366 is Luhn-valid. It must NOT be redacted because it's
 	// in a structural field, not a content field.
@@ -182,7 +182,7 @@ func TestWorkspaceIDNotRedactedE2E(t *testing.T) {
 		]
 	}`)
 
-	blocks := []*auditBlock{
+	blocks := []*AuditBlock{
 		makeBlock(pool, 1, 0, payload, true, false),
 	}
 
@@ -201,7 +201,7 @@ func TestWorkspaceIDNotRedactedE2E(t *testing.T) {
 // TestCollectorNonBlockingDuringFlush verifies that the double-buffered
 // collector continues accepting results during an active flush operation.
 func TestCollectorNonBlockingDuringFlush(t *testing.T) {
-	input := make(chan *telemetryLog, 200)
+	input := make(chan *TelemetryLog, 200)
 	gate := make(chan struct{})        // blocks the first flush
 	flushStarted := make(chan struct{}) // signals when flush callback begins
 	var mu sync.Mutex
@@ -215,7 +215,7 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 			batchSize:     5,
 			flushInterval: 20 * time.Millisecond,
 			input:         input,
-			flush: func(batch []*telemetryLog) {
+			flush: func(batch []*TelemetryLog) {
 				select {
 				case flushStarted <- struct{}{}:
 				default:
@@ -230,7 +230,7 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 
 	// Send first batch to trigger a flush.
 	for i := range 5 {
-		input <- &telemetryLog{RequestID: uint64(i)}
+		input <- &TelemetryLog{RequestID: uint64(i)}
 	}
 
 	// Wait for the flush callback to actually start executing.
@@ -242,7 +242,7 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 
 	// Send more while flush is blocked — these should NOT be dropped.
 	for i := range 20 {
-		input <- &telemetryLog{RequestID: uint64(100 + i)}
+		input <- &TelemetryLog{RequestID: uint64(100 + i)}
 	}
 
 	// Release the blocked flush and close input.
@@ -265,7 +265,7 @@ func TestCollectorNonBlockingDuringFlush(t *testing.T) {
 // TestSSEStreamPIIRedaction verifies that SSE-framed responses with PII in
 // delta content are correctly extracted and redacted.
 func TestSSEStreamPIIRedaction(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
+	pool := NewBlockPool(64*1024*10, 64*1024)
 
 	// SSE stream where an email is split across two delta chunks.
 	ssePayload := []byte(
@@ -274,7 +274,7 @@ func TestSSEStreamPIIRedaction(t *testing.T) {
 			"data: [DONE]\n\n",
 	)
 
-	blocks := []*auditBlock{
+	blocks := []*AuditBlock{
 		makeBlock(pool, 1, 0, ssePayload, true, false),
 	}
 
@@ -297,9 +297,9 @@ func TestSSEStreamPIIRedaction(t *testing.T) {
 // TestMultipleRequestsPipeline verifies that multiple concurrent requests
 // are all processed correctly through the full pipeline.
 func TestMultipleRequestsPipeline(t *testing.T) {
-	pool := newBlockPool(64*1024*20, 64*1024)
+	pool := NewBlockPool(64*1024*20, 64*1024)
 
-	blocks := []*auditBlock{
+	blocks := []*AuditBlock{
 		makeBlock(pool, 1, 0, []byte(`{"messages":[{"role":"user","content":"SSN 123-45-6789"}]}`), true, false),
 		makeBlock(pool, 2, 0, []byte(`{"messages":[{"role":"user","content":"email test@test.com"}]}`), true, false),
 		makeBlock(pool, 3, 0, []byte(`{"messages":[{"role":"user","content":"no PII here"}]}`), true, false),
@@ -312,7 +312,7 @@ func TestMultipleRequestsPipeline(t *testing.T) {
 	}
 
 	// Build a map for easier assertion.
-	byID := make(map[uint64]*telemetryLog)
+	byID := make(map[uint64]*TelemetryLog)
 	for _, l := range logs {
 		byID[l.RequestID] = l
 	}

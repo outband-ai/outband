@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"fmt"
@@ -43,7 +43,7 @@ func unreachableURL(t *testing.T) *url.URL {
 func TestHealthzAlwaysOK(t *testing.T) {
 	// /healthz is a process-level liveness probe — always 200.
 	unreachable := unreachableURL(t)
-	proxy := newProxy(proxyConfig{targetURL: unreachable})
+	proxy := newProxy(&ProxyConfig{TargetURL: unreachable})
 	ready := &atomic.Bool{} // not ready, doesn't matter for liveness
 
 	h := newHealthHandler(proxy, unreachable, ready)
@@ -67,7 +67,7 @@ func TestReadyzReady(t *testing.T) {
 	defer upstream.Close()
 
 	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+	proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 	ready := &atomic.Bool{}
 	ready.Store(true)
 
@@ -91,7 +91,7 @@ func TestReadyzNotReadyPipelineUninitialized(t *testing.T) {
 	defer upstream.Close()
 
 	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+	proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 	ready := &atomic.Bool{} // not stored — defaults to false
 
 	h := newHealthHandler(proxy, upstreamURL, ready)
@@ -117,7 +117,7 @@ func TestReadyzNotReadyPipelineUninitialized(t *testing.T) {
 
 func TestReadyzNotReadyUpstreamUnreachable(t *testing.T) {
 	unreachable := unreachableURL(t)
-	proxy := newProxy(proxyConfig{targetURL: unreachable})
+	proxy := newProxy(&ProxyConfig{TargetURL: unreachable})
 	ready := &atomic.Bool{}
 	ready.Store(true) // pipeline ready, but upstream down
 
@@ -147,7 +147,7 @@ func TestReadyzTransitionsToReady(t *testing.T) {
 	defer upstream.Close()
 
 	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+	proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 	ready := &atomic.Bool{}
 
 	h := newHealthHandler(proxy, upstreamURL, ready)
@@ -179,7 +179,7 @@ func TestHealthHandlerProxiesNonHealthPaths(t *testing.T) {
 	defer upstream.Close()
 
 	upstreamURL, _ := url.Parse(upstream.URL)
-	proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+	proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 	ready := &atomic.Bool{}
 	ready.Store(true)
 

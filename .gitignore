@@ -1,5 +1,5 @@
 # Binaries
-outband
+/outband
 cmd/mockllm/mockllm
 *.exe
 *.exe~
@@ -17,6 +17,7 @@ cmd/mockllm/mockllm
 # IDE
 .idea/
 .vscode/
+CLAUDE.md
 *.swp
 *.swo
 *~

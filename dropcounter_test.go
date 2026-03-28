@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bytes"
@@ -24,47 +24,47 @@ import (
 )
 
 func TestDropCounterIncrement(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 	for range 100 {
-		dc.drop()
+		dc.Increment()
 	}
-	if got := dc.total.Load(); got != 100 {
+	if got := dc.Total.Load(); got != 100 {
 		t.Errorf("total = %d, want 100", got)
 	}
-	if got := dc.interval.Load(); got != 100 {
+	if got := dc.Interval.Load(); got != 100 {
 		t.Errorf("interval = %d, want 100", got)
 	}
 }
 
 func TestDropCounterPoll(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 
 	for range 5 {
-		dc.drop()
+		dc.Increment()
 	}
-	n, total := dc.poll()
+	n, total := dc.Poll()
 	if n != 5 || total != 5 {
 		t.Errorf("poll() = (%d, %d), want (5, 5)", n, total)
 	}
 
 	// Interval should be reset; total should be monotonic.
 	for range 3 {
-		dc.drop()
+		dc.Increment()
 	}
-	n, total = dc.poll()
+	n, total = dc.Poll()
 	if n != 3 || total != 8 {
 		t.Errorf("poll() = (%d, %d), want (3, 8)", n, total)
 	}
 
 	// No new drops — interval should be 0.
-	n, total = dc.poll()
+	n, total = dc.Poll()
 	if n != 0 || total != 8 {
 		t.Errorf("poll() = (%d, %d), want (0, 8)", n, total)
 	}
 }
 
 func TestDropCounterConcurrent(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 	const goroutines = 100
 	const dropsPerGoroutine = 1000
 
@@ -74,20 +74,20 @@ func TestDropCounterConcurrent(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for range dropsPerGoroutine {
-				dc.drop()
+				dc.Increment()
 			}
 		}()
 	}
 	wg.Wait()
 
 	want := int64(goroutines * dropsPerGoroutine)
-	if got := dc.total.Load(); got != want {
+	if got := dc.Total.Load(); got != want {
 		t.Errorf("total = %d, want %d", got, want)
 	}
 }
 
 func TestDropPollerEmitsWarning(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
@@ -96,7 +96,7 @@ func TestDropPollerEmitsWarning(t *testing.T) {
 
 	// Trigger drops.
 	for range 10 {
-		dc.drop()
+		dc.Increment()
 	}
 
 	// Wait for poller to fire, then stop before reading buffer to avoid race.
@@ -113,7 +113,7 @@ func TestDropPollerEmitsWarning(t *testing.T) {
 }
 
 func TestDropPollerSilentWhenNone(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 
 	var buf bytes.Buffer
 	logger := log.New(&buf, "", 0)
@@ -130,7 +130,7 @@ func TestDropPollerSilentWhenNone(t *testing.T) {
 }
 
 func TestDropPollerShutdown(t *testing.T) {
-	dc := newDropCounter()
+	dc := NewDropCounter()
 	logger := log.New(&bytes.Buffer{}, "", 0)
 
 	stop := startDropPoller(context.Background(), dc, 100*time.Millisecond, logger)

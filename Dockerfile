@@ -1,9 +1,8 @@
 FROM golang:1.26 AS builder
 WORKDIR /src
-COPY go.mod go.sum *.go ./
-COPY cmd/ ./cmd/
+COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /outband .
+RUN CGO_ENABLED=0 go build -ldflags "-X main.version=${VERSION}" -o /outband ./cmd/outband/
 RUN CGO_ENABLED=0 go build -o /mockllm ./cmd/mockllm
 
 FROM gcr.io/distroless/static-debian12 AS proxy

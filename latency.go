@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"context"
@@ -21,7 +21,10 @@ import (
 
 type contextKey int
 
-const requestStartKey contextKey = iota
+const (
+	requestStartKey contextKey = iota
+	requestIDKey               // used by responseCaptureMiddleware
+)
 
 // latencyMiddleware stamps request arrival time into the request context.
 // It does NOT measure elapsed time — that happens in the Rewrite hook,
