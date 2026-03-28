@@ -20,7 +20,18 @@ jobs:
         run: go vet ./...
 
       - name: Test
-        run: go test -timeout 120s -count=1 ./...
+        run: go test -race -timeout 180s -count=1 ./...
 
       - name: Build
         run: go build -ldflags "-X main.version=ci-${{ github.sha }}" -o outband .
+
+  demo:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Demo
+        run: |
+          chmod +x demo.sh
+          ./demo.sh

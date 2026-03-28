@@ -51,6 +51,13 @@ func envInt(key string, fallback int) int {
 	return n
 }
 
+func truncateBody(b []byte, max int) string {
+	if len(b) <= max {
+		return string(b)
+	}
+	return string(b[:max]) + "..."
+}
+
 func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.HandlerFunc {
 	type request struct {
 		Stream bool `json:"stream"`
@@ -69,7 +76,8 @@ func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.Han
 			return
 		}
 
-		log.Printf("%s %s Content-Length:%d", r.Method, r.URL.Path, r.ContentLength)
+		log.Printf("REQ %s %s content_length=%d body_preview=%q",
+			r.Method, r.URL.Path, r.ContentLength, truncateBody(body, 200))
 
 		var req request
 		if len(body) > 0 {
@@ -79,18 +87,40 @@ func handler(delay time.Duration, chunks int, chunkDelay time.Duration) http.Han
 			}
 		}
 
+		// X-Mock-Stream header overrides body stream field.
+		if v := r.Header.Get("X-Mock-Stream"); v != "" {
+			req.Stream = (v == "true")
+		}
+
+		// X-Mock-Response-PII injects PII into response content.
+		injectPII := r.Header.Get("X-Mock-Response-PII") == "true"
+
+		// X-Mock-Chunk-Delay overrides per-request chunk delay.
+		perRequestChunkDelay := chunkDelay
+		if v := r.Header.Get("X-Mock-Chunk-Delay"); v != "" {
+			if d, err := time.ParseDuration(v); err == nil {
+				perRequestChunkDelay = d
+			}
+		}
+
 		time.Sleep(delay)
 
 		if req.Stream {
-			writeSSE(w, chunks, chunkDelay)
+			writeSSE(w, chunks, perRequestChunkDelay, injectPII)
 		} else {
-			writeJSON(w)
+			writeJSON(w, injectPII)
 		}
 	}
 }
 
-func writeJSON(w http.ResponseWriter) {
+func writeJSON(w http.ResponseWriter, injectPII bool) {
 	w.Header().Set("Content-Type", "application/json")
+
+	content := "This is a mock response from the outband mock LLM endpoint."
+	if injectPII {
+		content += " Contact: jane.doe@example.com"
+	}
+
 	resp := map[string]any{
 		"id":      "chatcmpl-outband-mock",
 		"object":  "chat.completion",
@@ -100,7 +130,7 @@ func writeJSON(w http.ResponseWriter) {
 			"index": 0,
 			"message": map[string]string{
 				"role":    "assistant",
-				"content": "This is a mock response from the outband mock LLM endpoint.",
+				"content": content,
 			},
 			"finish_reason": "stop",
 		}},
@@ -113,7 +143,7 @@ func writeJSON(w http.ResponseWriter) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func writeSSE(w http.ResponseWriter, chunks int, chunkDelay time.Duration) {
+func writeSSE(w http.ResponseWriter, chunks int, chunkDelay time.Duration, injectPII bool) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
@@ -131,6 +161,12 @@ func writeSSE(w http.ResponseWriter, chunks int, chunkDelay time.Duration) {
 
 	for i := 0; i < chunks; i++ {
 		token := tokens[i%len(tokens)]
+
+		// Inject PII into the last content chunk.
+		if injectPII && i == chunks-1 {
+			token += " Contact: jane.doe@example.com"
+		}
+
 		chunk := map[string]any{
 			"id":      "chatcmpl-outband-mock",
 			"object":  "chat.completion.chunk",
