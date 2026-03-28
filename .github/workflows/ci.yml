@@ -23,7 +23,7 @@ jobs:
         run: go test -race -timeout 180s -count=1 ./...
 
       - name: Build
-        run: go build -ldflags "-X main.version=ci-${{ github.sha }}" -o outband .
+        run: go build -ldflags "-X main.version=ci-${{ github.sha }}" -o outband ./cmd/outband/
 
   demo:
     runs-on: ubuntu-latest
