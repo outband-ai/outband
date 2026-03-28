@@ -224,8 +224,8 @@ if [ -f "$LOG_DIR/outband-telemetry-current.jsonl" ]; then
     }' | sed 's/^/  /'
     echo ""
 
-    assert "Cryptographic hashes present" jq -e '.original_hash | length == 64' <<< "$DETAIL_ENTRY"
-    assert "Capture complete" jq -e '.capture_complete == true' <<< "$DETAIL_ENTRY"
+    assert "Cryptographic hashes present" bash -c 'jq -e ".original_hash | length == 64" >/dev/null <<< "$1"' -- "$DETAIL_ENTRY"
+    assert "Capture complete" bash -c 'jq -e ".capture_complete == true" >/dev/null <<< "$1"' -- "$DETAIL_ENTRY"
 fi
 
 pause
