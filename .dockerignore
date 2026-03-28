@@ -8,3 +8,4 @@ cmd/mockllm/mockllm
 .idea
 .vscode
 .claude
+demo-output

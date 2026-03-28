@@ -106,7 +106,9 @@ mkdir -p "$LOG_DIR" "$EVIDENCE_DIR"
 # Run proxy container as current user so volume-mounted files are
 # readable by the host (demo script reads JSONL/evidence files directly).
 export UID GID=$(id -g)
-docker compose $COMPOSE_FILES build --no-cache --quiet
+BUILD_FLAGS="--quiet"
+[ "${OUTBAND_NO_CACHE:-}" = "true" ] && BUILD_FLAGS="--no-cache $BUILD_FLAGS"
+docker compose $COMPOSE_FILES build $BUILD_FLAGS
 docker compose $COMPOSE_FILES up -d --wait --wait-timeout 60
 
 echo -e "  ${DIM}[OUTBAND] Target: http://mockllm:9090 (mock OpenAI endpoint)${NC}"
