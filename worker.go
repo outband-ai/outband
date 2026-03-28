@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"crypto/sha256"
@@ -24,8 +24,8 @@ import (
 	"time"
 )
 
-// telemetryLog is the output record from the processing pipeline.
-type telemetryLog struct {
+// TelemetryLog is the output record from the processing pipeline.
+type TelemetryLog struct {
 	RequestID          uint64    `json:"request_id"`
 	Timestamp          time.Time `json:"timestamp"`
 	Version            string    `json:"version"`
@@ -37,6 +37,13 @@ type telemetryLog struct {
 	ExtractorUsed      string    `json:"extractor_used"`
 	FieldsScanned      int       `json:"fields_scanned"`
 	CaptureComplete    bool      `json:"capture_complete"`
+
+	// Response fields — populated only by enterprise binary.
+	ResponseRedactedPayload string   `json:"response_redacted_payload,omitempty"`
+	ResponseHash            string   `json:"response_hash,omitempty"`
+	ResponsePIICategories   []string `json:"response_pii_categories,omitempty"`
+	ResponseCaptureComplete bool     `json:"response_capture_complete,omitempty"`
+	ResponseExtractorUsed   string   `json:"response_extractor_used,omitempty"`
 }
 
 // workerStats exposes atomic counters for observability.
@@ -48,7 +55,7 @@ type workerStats struct {
 // The RedactorChain is shared across all workers (it is stateless and safe
 // for concurrent use). Workers exit when input is closed. Returns a function
 // that blocks until all workers have exited.
-func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- *telemetryLog, chain *RedactorChain, stats *workerStats) (wait func()) {
+func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- *TelemetryLog, chain *RedactorChain, stats *workerStats) (wait func()) {
 	var wg sync.WaitGroup
 	for range numWorkers {
 		wg.Add(1)
@@ -71,17 +78,26 @@ func startWorkers(numWorkers int, input <-chan *assembledPayload, output chan<- 
 // processPayload is the core per-request processing function.
 // It extracts content fields, redacts PII via the chain, computes hashes,
 // and builds the telemetry log entry.
-func processPayload(p *assembledPayload, chain *RedactorChain) *telemetryLog {
+func processPayload(p *assembledPayload, chain *RedactorChain) *TelemetryLog {
 	now := time.Now()
 	originalHash := hashPayload(p.data)
 
-	ext := extractorForAPI(p.apiType)
+	// For response-direction payloads, check the extractor registry first
+	// (populated by enterprise module via RegisterExtractor). Fall back to
+	// the built-in API-type extractor which already handles SSE.
+	var ext PayloadExtractor
+	if p.direction == DirectionResponse {
+		ext = ExtractorForDirection(DirectionResponse, extractorName(p.apiType))
+	}
+	if ext == nil {
+		ext = extractorForAPI(p.apiType)
+	}
 	var fields []ContentField
 	if ext != nil {
 		fields = ext.ExtractContent(p.data)
 	}
 
-	var allCategories []piiCategory
+	var allCategories []PIICategory
 	var redactedFields []ContentField
 	for _, f := range fields {
 		text, cats := chain.Redact(f.Text)
@@ -97,7 +113,7 @@ func processPayload(p *assembledPayload, chain *RedactorChain) *telemetryLog {
 	redactedHash := hashRedacted(redactedPayload, now)
 
 	// Deduplicate categories across all fields.
-	catSet := make(map[piiCategory]struct{})
+	catSet := make(map[PIICategory]struct{})
 	for _, c := range allCategories {
 		catSet[c] = struct{}{}
 	}
@@ -107,10 +123,10 @@ func processPayload(p *assembledPayload, chain *RedactorChain) *telemetryLog {
 	}
 	sort.Strings(cats)
 
-	return &telemetryLog{
+	return &TelemetryLog{
 		RequestID:          p.requestID,
 		Timestamp:          now,
-		Version:            version,
+		Version:            Version,
 		OriginalHash:       originalHash,
 		RedactedPayload:    redactedPayload,
 		RedactedHash:       redactedHash,

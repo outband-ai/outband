@@ -11,22 +11,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"io"
 	"sync"
 )
 
-// blockAllocator abstracts the block pool for testability.
-type blockAllocator interface {
-	get() *auditBlock
-	put(*auditBlock)
+// BlockAllocator abstracts the block pool for testability.
+type BlockAllocator interface {
+	Get() *AuditBlock
+	Put(*AuditBlock)
 }
 
-// dropRecorder abstracts the drop counter for testability.
-type dropRecorder interface {
-	drop()
+// DropRecorder abstracts the drop counter for testability.
+type DropRecorder interface {
+	Increment()
 }
 
 // auditReader wraps an io.ReadCloser and copies bytes into audit blocks
@@ -37,10 +37,10 @@ type dropRecorder interface {
 // that request. The upstream connection is never blocked by the audit path.
 type auditReader struct {
 	src       io.ReadCloser
-	pool      blockAllocator
-	drops     dropRecorder
-	queue     chan<- *auditBlock
-	current   *auditBlock
+	pool      BlockAllocator
+	drops     DropRecorder
+	queue     chan<- *AuditBlock
+	current   *AuditBlock
 	abandoned bool
 	finalized bool
 	seq       uint32
@@ -49,7 +49,7 @@ type auditReader struct {
 	closed    bool
 }
 
-func newAuditReader(src io.ReadCloser, pool blockAllocator, drops dropRecorder, queue chan<- *auditBlock, requestID uint64) *auditReader {
+func newAuditReader(src io.ReadCloser, pool BlockAllocator, drops DropRecorder, queue chan<- *AuditBlock, requestID uint64) *auditReader {
 	return &auditReader{
 		src:       src,
 		pool:      pool,
@@ -80,50 +80,50 @@ func (a *auditReader) Read(p []byte) (int, error) {
 func (a *auditReader) capture(data []byte) {
 	for len(data) > 0 {
 		if a.current == nil {
-			blk := a.pool.get()
+			blk := a.pool.Get()
 			if blk == nil {
 				a.abandon()
 				return
 			}
-			blk.requestID = a.requestID
-			blk.seq = a.seq
+			blk.RequestID = a.requestID
+			blk.Seq = a.seq
 			a.seq++
 			a.current = blk
 		}
 
-		written := a.current.write(data)
+		written := a.current.Write(data)
 		data = data[written:]
 
-		if a.current.remaining() == 0 {
+		if a.current.Remaining() == 0 {
 			if len(data) > 0 {
 				// More data to capture — check if we can continue before
 				// sending the full block. If not, mark it as abort so the
 				// consumer knows this request's capture is incomplete.
-				next := a.pool.get()
+				next := a.pool.Get()
 				if next == nil {
-					a.current.abort = true
+					a.current.Abort = true
 					if !a.sendBlock(a.current) {
-						a.pool.put(a.current)
+						a.pool.Put(a.current)
 					}
 					a.current = nil
 					if a.drops != nil {
-						a.drops.drop()
+						a.drops.Increment()
 					}
 					a.abandoned = true
 					return
 				}
 				if !a.sendBlock(a.current) {
-					a.pool.put(a.current)
-					a.pool.put(next)
+					a.pool.Put(a.current)
+					a.pool.Put(next)
 					a.current = nil
 					if a.drops != nil {
-						a.drops.drop()
+						a.drops.Increment()
 					}
 					a.abandoned = true
 					return
 				}
-				next.requestID = a.requestID
-				next.seq = a.seq
+				next.RequestID = a.requestID
+				next.Seq = a.seq
 				a.seq++
 				a.current = next
 			} else {
@@ -142,7 +142,7 @@ func (a *auditReader) capture(data []byte) {
 // sendBlock performs a non-blocking send of a block to the audit queue.
 // It recovers from panics caused by sending on a closed channel during
 // server shutdown, treating them as a failed send.
-func (a *auditReader) sendBlock(blk *auditBlock) (ok bool) {
+func (a *auditReader) sendBlock(blk *AuditBlock) (ok bool) {
 	defer func() {
 		if recover() != nil {
 			ok = false
@@ -169,31 +169,31 @@ func (a *auditReader) finish() {
 			return // empty body — nothing to finalize
 		}
 		// Previous block was full and already sent; need a sentinel.
-		blk := a.pool.get()
+		blk := a.pool.Get()
 		if blk == nil {
 			if a.drops != nil {
-				a.drops.drop()
+				a.drops.Increment()
 			}
 			a.abandoned = true
 			return
 		}
-		blk.requestID = a.requestID
-		blk.seq = a.seq
-		blk.final = true
+		blk.RequestID = a.requestID
+		blk.Seq = a.seq
+		blk.Final = true
 		if !a.sendBlock(blk) {
-			a.pool.put(blk)
+			a.pool.Put(blk)
 			if a.drops != nil {
-				a.drops.drop()
+				a.drops.Increment()
 			}
 			a.abandoned = true
 		}
 		return
 	}
-	a.current.final = true
+	a.current.Final = true
 	if !a.sendBlock(a.current) {
-		a.pool.put(a.current)
+		a.pool.Put(a.current)
 		if a.drops != nil {
-			a.drops.drop()
+			a.drops.Increment()
 		}
 	}
 	a.current = nil
@@ -203,14 +203,14 @@ func (a *auditReader) finish() {
 // abort signal block so the consumer knows to discard partial data.
 func (a *auditReader) abandon() {
 	if a.current != nil {
-		a.current.abort = true
+		a.current.Abort = true
 		if !a.sendBlock(a.current) {
-			a.pool.put(a.current)
+			a.pool.Put(a.current)
 		}
 		a.current = nil
 	}
 	if a.drops != nil {
-		a.drops.drop()
+		a.drops.Increment()
 	}
 	a.abandoned = true
 }
@@ -224,7 +224,7 @@ func (a *auditReader) Close() error {
 		if !a.abandoned {
 			a.finish()
 		} else if a.current != nil {
-			a.pool.put(a.current)
+			a.pool.Put(a.current)
 			a.current = nil
 		}
 		err = a.src.Close()

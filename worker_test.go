@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"strings"
@@ -164,7 +164,7 @@ func TestHashRedactedIncludesTimestamp(t *testing.T) {
 
 func TestWorkerPoolThroughput(t *testing.T) {
 	input := make(chan *assembledPayload, 100)
-	output := make(chan *telemetryLog, 100)
+	output := make(chan *TelemetryLog, 100)
 	stats := &workerStats{}
 
 	wait := startWorkers(4, input, output, testChain(), stats)
@@ -193,7 +193,7 @@ func TestWorkerPoolThroughput(t *testing.T) {
 
 func TestWorkerPoolShutdown(t *testing.T) {
 	input := make(chan *assembledPayload)
-	output := make(chan *telemetryLog, 16)
+	output := make(chan *TelemetryLog, 16)
 	stats := &workerStats{}
 
 	wait := startWorkers(2, input, output, testChain(), stats)
@@ -214,7 +214,7 @@ func TestWorkerPoolShutdown(t *testing.T) {
 
 func TestWorkerNonBlockingOutput(t *testing.T) {
 	input := make(chan *assembledPayload, 10)
-	output := make(chan *telemetryLog, 1) // very small buffer
+	output := make(chan *TelemetryLog, 1) // very small buffer
 	stats := &workerStats{}
 
 	wait := startWorkers(1, input, output, testChain(), stats)

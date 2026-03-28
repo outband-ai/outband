@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"encoding/json"
@@ -88,7 +88,7 @@ func NewJSONLWriter(dir string, maxSize int64, maxAge time.Duration, maxFiles in
 // Returns the number of entries successfully written and any error.
 // On partial failure, written < len(batch) and err != nil. The caller
 // should only treat batch[:written] as persisted.
-func (w *JSONLWriter) Flush(batch []*telemetryLog) (int, error) {
+func (w *JSONLWriter) Flush(batch []*TelemetryLog) (int, error) {
 	if len(batch) == 0 {
 		return 0, nil
 	}

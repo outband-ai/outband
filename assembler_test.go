@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"net/url"
@@ -19,24 +19,24 @@ import (
 	"time"
 )
 
-// makeBlock creates an auditBlock with the given fields for testing.
-func makeBlock(pool *blockPool, requestID uint64, seq uint32, data []byte, final, abort bool) *auditBlock {
-	blk := pool.get()
+// makeBlock creates an AuditBlock with the given fields for testing.
+func makeBlock(pool *BlockPool, requestID uint64, seq uint32, data []byte, final, abort bool) *AuditBlock {
+	blk := pool.Get()
 	if blk == nil {
 		panic("pool exhausted in test setup")
 	}
-	blk.requestID = requestID
-	blk.seq = seq
-	blk.final = final
-	blk.abort = abort
-	copy(blk.data, data)
-	blk.n = len(data)
+	blk.RequestID = requestID
+	blk.Seq = seq
+	blk.Final = final
+	blk.Abort = abort
+	copy(blk.Data, data)
+	blk.Used = len(data)
 	return blk
 }
 
 func TestAssemblerSingleRequest(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -74,8 +74,8 @@ func TestAssemblerSingleRequest(t *testing.T) {
 }
 
 func TestAssemblerMultipleRequests(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 32)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 32)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -119,8 +119,8 @@ func TestAssemblerMultipleRequests(t *testing.T) {
 }
 
 func TestAssemblerAbort(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -149,8 +149,8 @@ func TestAssemblerAbort(t *testing.T) {
 }
 
 func TestAssemblerOversizePayload(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -189,8 +189,8 @@ func TestAssemblerOversizePayload(t *testing.T) {
 }
 
 func TestAssemblerStaleEviction(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -226,8 +226,8 @@ func TestAssemblerStaleEviction(t *testing.T) {
 }
 
 func TestAssemblerBlockBoundaryIntegrity(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -256,8 +256,8 @@ func TestAssemblerBlockBoundaryIntegrity(t *testing.T) {
 }
 
 func TestAssemblerShutdown(t *testing.T) {
-	pool := newBlockPool(64*1024*10, 64*1024)
-	auditQueue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(64*1024*10, 64*1024)
+	auditQueue := make(chan *AuditBlock, 16)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -284,8 +284,8 @@ func TestAssemblerShutdown(t *testing.T) {
 
 func TestAssemblerBlocksReturnedToPool(t *testing.T) {
 	totalBlocks := 10
-	pool := newBlockPool(64*1024*totalBlocks, 64*1024)
-	auditQueue := make(chan *auditBlock, 32)
+	pool := NewBlockPool(64*1024*totalBlocks, 64*1024)
+	auditQueue := make(chan *AuditBlock, 32)
 	workerInput := make(chan *assembledPayload, 16)
 	stats := &assemblerStats{}
 
@@ -313,7 +313,7 @@ func TestAssemblerBlocksReturnedToPool(t *testing.T) {
 	// we should be able to get all 10 back.
 	available := 0
 	for range totalBlocks {
-		if pool.get() != nil {
+		if pool.Get() != nil {
 			available++
 		}
 	}

@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bufio"
@@ -50,7 +50,7 @@ func (e *proxyTestEnv) close() {
 func newProxyTestEnv(upstream http.Handler) *proxyTestEnv {
 	us := httptest.NewServer(upstream)
 	usURL, _ := url.Parse(us.URL)
-	p := newProxy(proxyConfig{targetURL: usURL})
+	p := newProxy(&ProxyConfig{TargetURL: usURL})
 	ps := httptest.NewServer(p)
 	return &proxyTestEnv{Upstream: us, Proxy: ps, UpstreamURL: usURL}
 }
@@ -325,7 +325,7 @@ func TestUpstreamTimeout(t *testing.T) {
 		DisableCompression:    true,
 	}
 
-	p := newProxy(proxyConfig{targetURL: usURL})
+	p := newProxy(&ProxyConfig{TargetURL: usURL})
 	p.Transport = transport
 	timeoutProxy := httptest.NewServer(p)
 	defer timeoutProxy.Close()
@@ -409,8 +409,8 @@ func TestErrorPassthrough(t *testing.T) {
 // auditProxyTestEnv extends proxyTestEnv with audit capture components.
 type auditProxyTestEnv struct {
 	proxyTestEnv
-	Pool  *blockPool
-	Queue chan *auditBlock
+	Pool  *BlockPool
+	Queue chan *AuditBlock
 	Drops *mockDropRecorder
 }
 
@@ -422,16 +422,16 @@ func newAuditProxyTestEnv(upstream http.Handler, poolBytes, blockSize int) *audi
 	us := httptest.NewServer(upstream)
 	usURL, _ := url.Parse(us.URL)
 
-	pool := newBlockPool(poolBytes, blockSize)
-	queue := make(chan *auditBlock, 256)
+	pool := NewBlockPool(poolBytes, blockSize)
+	queue := make(chan *AuditBlock, 256)
 	drops := &mockDropRecorder{}
 
-	p := newProxy(proxyConfig{
-		targetURL:  usURL,
-		auditPool:  pool,
-		auditQueue: queue,
-		drops:      drops,
-		nextReqID:  &atomic.Uint64{},
+	p := newProxy(&ProxyConfig{
+		TargetURL:  usURL,
+		AuditPool:  pool,
+		AuditQueue: queue,
+		Drops:      drops,
+		NextReqID:  &atomic.Uint64{},
 	})
 	ps := httptest.NewServer(p)
 
@@ -550,7 +550,7 @@ func TestAuditPoolExhaustion(t *testing.T) {
 	}
 
 	// Pool exhaustion counter must have incremented.
-	if got := env.Pool.exhaustions.Load(); got == 0 {
+	if got := env.Pool.Exhaustions.Load(); got == 0 {
 		t.Error("expected pool exhaustions > 0")
 	}
 }
@@ -591,9 +591,9 @@ func TestAuditRequestIDGrouping(t *testing.T) {
 	blocks := collectBlocks(env.Queue)
 
 	// Group blocks by requestID.
-	grouped := make(map[uint64][]*auditBlock)
+	grouped := make(map[uint64][]*AuditBlock)
 	for _, blk := range blocks {
-		grouped[blk.requestID] = append(grouped[blk.requestID], blk)
+		grouped[blk.RequestID] = append(grouped[blk.RequestID], blk)
 	}
 
 	if len(grouped) != 3 {
@@ -603,19 +603,19 @@ func TestAuditRequestIDGrouping(t *testing.T) {
 	// For each request, verify sequential ordering and a terminal block.
 	for reqID, reqBlocks := range grouped {
 		// Sort by seq to verify ordering.
-		slices.SortFunc(reqBlocks, func(a, b *auditBlock) int {
-			return int(a.seq) - int(b.seq)
+		slices.SortFunc(reqBlocks, func(a, b *AuditBlock) int {
+			return int(a.Seq) - int(b.Seq)
 		})
 
 		for i, blk := range reqBlocks {
-			if blk.seq != uint32(i) {
-				t.Errorf("requestID %d: block %d has seq=%d, want %d", reqID, i, blk.seq, i)
+			if blk.Seq != uint32(i) {
+				t.Errorf("requestID %d: block %d has seq=%d, want %d", reqID, i, blk.Seq, i)
 			}
 		}
 
 		// Last block must be final or abort.
 		last := reqBlocks[len(reqBlocks)-1]
-		if !last.final && !last.abort {
+		if !last.Final && !last.Abort {
 			t.Errorf("requestID %d: last block has neither final nor abort set", reqID)
 		}
 	}
@@ -694,7 +694,7 @@ func BenchmarkProxySequential(b *testing.B) {
 	})
 
 	b.Run("proxied", func(b *testing.B) {
-		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+		proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()
 
@@ -781,7 +781,7 @@ func BenchmarkProxyConcurrent(b *testing.B) {
 	})
 
 	b.Run("proxied", func(b *testing.B) {
-		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+		proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()
 
@@ -894,7 +894,7 @@ func BenchmarkProxyStreaming(b *testing.B) {
 		b.Run(tc.name, func(b *testing.B) {
 			targetURL := tc.url
 			if tc.name == "proxied" {
-				proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+				proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 				proxyServer := httptest.NewServer(proxy)
 				defer proxyServer.Close()
 				targetURL = proxyServer.URL
@@ -943,7 +943,7 @@ func BenchmarkAuditGCImpact(b *testing.B) {
 	upstreamURL, _ := url.Parse(upstream.URL)
 
 	b.Run("audit-disabled", func(b *testing.B) {
-		proxy := newProxy(proxyConfig{targetURL: upstreamURL})
+		proxy := newProxy(&ProxyConfig{TargetURL: upstreamURL})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()
 
@@ -966,21 +966,21 @@ func BenchmarkAuditGCImpact(b *testing.B) {
 	})
 
 	b.Run("audit-enabled", func(b *testing.B) {
-		pool := newBlockPool(10*1024*1024, 64*1024) // 10MB pool
-		queue := make(chan *auditBlock, 256)
+		pool := NewBlockPool(10*1024*1024, 64*1024) // 10MB pool
+		queue := make(chan *AuditBlock, 256)
 		go func() {
 			for blk := range queue {
-				pool.put(blk)
+				pool.Put(blk)
 			}
 		}()
 		defer close(queue)
 
-		proxy := newProxy(proxyConfig{
-			targetURL:  upstreamURL,
-			auditPool:  pool,
-			auditQueue: queue,
-			drops:      newDropCounter(),
-			nextReqID:  &atomic.Uint64{},
+		proxy := newProxy(&ProxyConfig{
+			TargetURL:  upstreamURL,
+			AuditPool:  pool,
+			AuditQueue: queue,
+			Drops:      NewDropCounter(),
+			NextReqID:  &atomic.Uint64{},
 		})
 		proxyServer := httptest.NewServer(proxy)
 		defer proxyServer.Close()

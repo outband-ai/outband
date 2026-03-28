@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"math"
@@ -46,6 +46,12 @@ type EvidenceSummary struct {
 	SidecarVersion            string            `json:"sidecar_version"`
 	SOC2ControlsSatisfied     []string          `json:"soc2_controls_satisfied"`
 	ISO42001ControlsSatisfied []string          `json:"iso42001_controls_satisfied"`
+
+	// Response audit fields — zero values in open source binary.
+	TotalResponsesAudited             uint64            `json:"total_responses_audited,omitempty"`
+	ResponsePIIDetected               uint64            `json:"response_pii_detected,omitempty"`
+	ResponseRedactionEventsByCategory map[string]uint64 `json:"response_redaction_events_by_category,omitempty"`
+	ResponseDrops                     uint64            `json:"response_drops,omitempty"`
 }
 
 // Aggregator accumulates per-window statistics from telemetry batches and
@@ -74,15 +80,21 @@ type Aggregator struct {
 	latencySamples  uint64
 	latencyBuckets  [maxLatencyBucketMS]uint64
 	latencyOverflow uint64
+
+	// Response audit counters — only non-zero in enterprise binary.
+	responsesAudited         uint64
+	responsePIIDetected      uint64
+	responseEventsByCategory map[string]uint64
 }
 
 // NewAggregator creates an Aggregator for the given redactor chain name.
 func NewAggregator(redactorName string) *Aggregator {
 	return &Aggregator{
-		windowStart:      time.Now(),
-		startTime:        time.Now(),
-		eventsByCategory: make(map[string]uint64),
-		redactorName:     redactorName,
+		windowStart:              time.Now(),
+		startTime:                time.Now(),
+		eventsByCategory:         make(map[string]uint64),
+		responseEventsByCategory: make(map[string]uint64),
+		redactorName:             redactorName,
 	}
 }
 
@@ -105,7 +117,7 @@ func (a *Aggregator) RecordLatency(latency time.Duration) {
 }
 
 // Ingest processes a batch of telemetry logs from the collector's flushFunc.
-func (a *Aggregator) Ingest(batch []*telemetryLog) {
+func (a *Aggregator) Ingest(batch []*TelemetryLog) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for _, entry := range batch {
@@ -113,6 +125,15 @@ func (a *Aggregator) Ingest(batch []*telemetryLog) {
 		a.piiDetected += uint64(len(entry.PIICategoriesFound))
 		for _, cat := range entry.PIICategoriesFound {
 			a.eventsByCategory[cat]++
+		}
+
+		// Response fields — only non-zero in enterprise binary.
+		if entry.ResponseRedactedPayload != "" {
+			a.responsesAudited++
+			a.responsePIIDetected += uint64(len(entry.ResponsePIICategories))
+			for _, cat := range entry.ResponsePIICategories {
+				a.responseEventsByCategory[cat]++
+			}
 		}
 	}
 }
@@ -141,10 +162,10 @@ func (a *Aggregator) computePercentile(target float64) int {
 }
 
 // SnapshotAndReset atomically captures the current window's statistics and
-// resets all counters for the next window. The ioErrors and droppedCount
-// parameters are passed in from the orchestrating goroutine (they live
-// outside the aggregator as atomic counters).
-func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, partial bool, sidecarVersion string) *EvidenceSummary {
+// resets all counters for the next window. The ioErrors, droppedCount, and
+// responseDroppedCount parameters are passed in from the orchestrating
+// goroutine (they live outside the aggregator as atomic counters).
+func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, responseDroppedCount uint64, partial bool, sidecarVersion string) *EvidenceSummary {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -198,6 +219,18 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 		ISO42001ControlsSatisfied: []string{"A.10.2", "A.10.3", "A.10.4"},
 	}
 
+	// Response audit fields — only populated when enterprise binary is active.
+	if a.responsesAudited > 0 || responseDroppedCount > 0 {
+		respCatCopy := make(map[string]uint64, len(a.responseEventsByCategory))
+		for k, v := range a.responseEventsByCategory {
+			respCatCopy[k] = v
+		}
+		summary.TotalResponsesAudited = a.responsesAudited
+		summary.ResponsePIIDetected = a.responsePIIDetected
+		summary.ResponseRedactionEventsByCategory = respCatCopy
+		summary.ResponseDrops = responseDroppedCount
+	}
+
 	// Reset for next window.
 	a.windowStart = now
 	a.requestsAudited = 0
@@ -206,6 +239,9 @@ func (a *Aggregator) SnapshotAndReset(ioErrors uint64, droppedCount uint64, part
 	a.latencySamples = 0
 	a.latencyOverflow = 0
 	a.latencyBuckets = [maxLatencyBucketMS]uint64{}
+	a.responsesAudited = 0
+	a.responsePIIDetected = 0
+	a.responseEventsByCategory = make(map[string]uint64)
 
 	return summary
 }

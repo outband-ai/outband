@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bytes"
@@ -22,17 +22,17 @@ import (
 	"time"
 )
 
-// mockDropRecorder counts drop() calls for test assertions.
+// mockDropRecorder counts Increment() calls for test assertions.
 type mockDropRecorder struct {
 	count atomic.Int64
 }
 
-func (m *mockDropRecorder) drop() { m.count.Add(1) }
+func (m *mockDropRecorder) Increment() { m.count.Add(1) }
 
 // collectBlocks drains the queue into a slice. It uses a short timeout
 // after the initial non-blocking drain to catch blocks from async producers.
-func collectBlocks(queue <-chan *auditBlock) []*auditBlock {
-	var out []*auditBlock
+func collectBlocks(queue <-chan *AuditBlock) []*AuditBlock {
+	var out []*AuditBlock
 	timeout := time.After(50 * time.Millisecond)
 	for {
 		select {
@@ -48,8 +48,8 @@ func collectBlocks(queue <-chan *auditBlock) []*auditBlock {
 }
 
 func TestAuditReaderBasic(t *testing.T) {
-	pool := newBlockPool(4*1024, 1024) // 4 x 1KB blocks
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(4*1024, 1024) // 4 x 1KB blocks
+	queue := make(chan *AuditBlock, 16)
 	drops := &mockDropRecorder{}
 
 	body := io.NopCloser(strings.NewReader("hello world"))
@@ -69,17 +69,17 @@ func TestAuditReaderBasic(t *testing.T) {
 		t.Fatalf("got %d blocks, want 1", len(blocks))
 	}
 	blk := blocks[0]
-	if blk.requestID != 42 {
-		t.Errorf("requestID = %d, want 42", blk.requestID)
+	if blk.RequestID != 42 {
+		t.Errorf("requestID = %d, want 42", blk.RequestID)
 	}
-	if blk.seq != 0 {
-		t.Errorf("seq = %d, want 0", blk.seq)
+	if blk.Seq != 0 {
+		t.Errorf("seq = %d, want 0", blk.Seq)
 	}
-	if !blk.final {
+	if !blk.Final {
 		t.Error("expected final=true")
 	}
-	if string(blk.data[:blk.n]) != "hello world" {
-		t.Errorf("block data = %q, want %q", blk.data[:blk.n], "hello world")
+	if string(blk.Data[:blk.Used]) != "hello world" {
+		t.Errorf("block data = %q, want %q", blk.Data[:blk.Used], "hello world")
 	}
 	if drops.count.Load() != 0 {
 		t.Errorf("drops = %d, want 0", drops.count.Load())
@@ -100,8 +100,8 @@ func (p *partialReader) Read(buf []byte) (int, error) {
 }
 
 func TestAuditReaderPartialRead(t *testing.T) {
-	pool := newBlockPool(4*1024, 1024)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(4*1024, 1024)
+	queue := make(chan *AuditBlock, 16)
 	drops := &mockDropRecorder{}
 
 	// Reader that returns at most 3 bytes per Read.
@@ -122,7 +122,7 @@ func TestAuditReaderPartialRead(t *testing.T) {
 	blocks := collectBlocks(queue)
 	var captured bytes.Buffer
 	for _, blk := range blocks {
-		captured.Write(blk.data[:blk.n])
+		captured.Write(blk.Data[:blk.Used])
 	}
 	if captured.String() != "abcdefghij" {
 		t.Errorf("captured = %q, want %q", captured.String(), "abcdefghij")
@@ -130,8 +130,8 @@ func TestAuditReaderPartialRead(t *testing.T) {
 }
 
 func TestAuditReaderEOF(t *testing.T) {
-	pool := newBlockPool(4*1024, 1024)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(4*1024, 1024)
+	queue := make(chan *AuditBlock, 16)
 
 	body := io.NopCloser(strings.NewReader("data"))
 	ar := newAuditReader(body, pool, &mockDropRecorder{}, queue, 99)
@@ -146,18 +146,18 @@ func TestAuditReaderEOF(t *testing.T) {
 		t.Fatal("expected at least one block")
 	}
 	last := blocks[len(blocks)-1]
-	if !last.final {
+	if !last.Final {
 		t.Error("last block should have final=true")
 	}
-	if last.requestID != 99 {
-		t.Errorf("requestID = %d, want 99", last.requestID)
+	if last.RequestID != 99 {
+		t.Errorf("requestID = %d, want 99", last.RequestID)
 	}
 }
 
 func TestAuditReaderMultipleBlocks(t *testing.T) {
 	const blockSize = 64
-	pool := newBlockPool(10*blockSize, blockSize)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(10*blockSize, blockSize)
+	queue := make(chan *AuditBlock, 16)
 
 	// Payload larger than one block.
 	payload := strings.Repeat("x", 3*blockSize+10)
@@ -181,13 +181,13 @@ func TestAuditReaderMultipleBlocks(t *testing.T) {
 	// Verify sequence numbers and requestID.
 	var captured bytes.Buffer
 	for i, blk := range blocks {
-		if blk.requestID != 7 {
-			t.Errorf("block %d: requestID = %d, want 7", i, blk.requestID)
+		if blk.RequestID != 7 {
+			t.Errorf("block %d: requestID = %d, want 7", i, blk.RequestID)
 		}
-		if blk.seq != uint32(i) {
-			t.Errorf("block %d: seq = %d, want %d", i, blk.seq, i)
+		if blk.Seq != uint32(i) {
+			t.Errorf("block %d: seq = %d, want %d", i, blk.Seq, i)
 		}
-		captured.Write(blk.data[:blk.n])
+		captured.Write(blk.Data[:blk.Used])
 	}
 	if captured.String() != payload {
 		t.Errorf("captured length = %d, want %d", captured.Len(), len(payload))
@@ -195,19 +195,19 @@ func TestAuditReaderMultipleBlocks(t *testing.T) {
 
 	// Only last block is final.
 	for i, blk := range blocks {
-		if i < len(blocks)-1 && blk.final {
+		if i < len(blocks)-1 && blk.Final {
 			t.Errorf("block %d: unexpected final=true", i)
 		}
 	}
-	if !blocks[len(blocks)-1].final {
+	if !blocks[len(blocks)-1].Final {
 		t.Error("last block should have final=true")
 	}
 }
 
 func TestAuditReaderExactFill(t *testing.T) {
 	const blockSize = 64
-	pool := newBlockPool(10*blockSize, blockSize)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(10*blockSize, blockSize)
+	queue := make(chan *AuditBlock, 16)
 
 	// Payload exactly fills 2 blocks — no leftover bytes.
 	payload := strings.Repeat("x", 2*blockSize)
@@ -231,7 +231,7 @@ func TestAuditReaderExactFill(t *testing.T) {
 	// Reassemble and verify data integrity.
 	var captured bytes.Buffer
 	for _, blk := range blocks {
-		captured.Write(blk.data[:blk.n])
+		captured.Write(blk.Data[:blk.Used])
 	}
 	if captured.String() != payload {
 		t.Errorf("captured length = %d, want %d", captured.Len(), len(payload))
@@ -239,15 +239,15 @@ func TestAuditReaderExactFill(t *testing.T) {
 
 	// Last block must have final=true (sentinel or data block).
 	last := blocks[len(blocks)-1]
-	if !last.final {
+	if !last.Final {
 		t.Error("last block should have final=true")
 	}
 }
 
 func TestAuditReaderAbandonPoolExhausted(t *testing.T) {
 	const blockSize = 64
-	pool := newBlockPool(2*blockSize, blockSize) // 2 blocks: one for data, one for abort
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(2*blockSize, blockSize) // 2 blocks: one for data, one for abort
+	queue := make(chan *AuditBlock, 16)
 	drops := &mockDropRecorder{}
 
 	// Payload needs 3+ blocks but pool only has 2, so after filling and
@@ -275,10 +275,10 @@ func TestAuditReaderAbandonPoolExhausted(t *testing.T) {
 	blocks := collectBlocks(queue)
 	var hasAbort bool
 	for _, blk := range blocks {
-		if blk.requestID != 5 {
-			t.Errorf("block requestID = %d, want 5", blk.requestID)
+		if blk.RequestID != 5 {
+			t.Errorf("block requestID = %d, want 5", blk.RequestID)
 		}
-		if blk.abort {
+		if blk.Abort {
 			hasAbort = true
 		}
 	}
@@ -289,8 +289,8 @@ func TestAuditReaderAbandonPoolExhausted(t *testing.T) {
 
 func TestAuditReaderAbandonPoolFullyExhausted(t *testing.T) {
 	const blockSize = 64
-	pool := newBlockPool(blockSize, blockSize) // only 1 block — no spare for abort
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(blockSize, blockSize) // only 1 block — no spare for abort
+	queue := make(chan *AuditBlock, 16)
 	drops := &mockDropRecorder{}
 
 	// With only 1 block, after filling and sending it, there's no block
@@ -315,8 +315,8 @@ func TestAuditReaderAbandonPoolFullyExhausted(t *testing.T) {
 
 func TestAuditReaderAbandonQueueFull(t *testing.T) {
 	const blockSize = 64
-	pool := newBlockPool(10*blockSize, blockSize)
-	queue := make(chan *auditBlock, 1) // queue can only hold 1 block
+	pool := NewBlockPool(10*blockSize, blockSize)
+	queue := make(chan *AuditBlock, 1) // queue can only hold 1 block
 	drops := &mockDropRecorder{}
 
 	// Payload needs 3+ blocks but queue can only hold 1.
@@ -339,8 +339,8 @@ func TestAuditReaderAbandonQueueFull(t *testing.T) {
 }
 
 func TestAuditReaderRequestIDUnique(t *testing.T) {
-	pool := newBlockPool(8*1024, 1024)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(8*1024, 1024)
+	queue := make(chan *AuditBlock, 16)
 	drops := &mockDropRecorder{}
 
 	body1 := io.NopCloser(strings.NewReader("request one"))
@@ -360,7 +360,7 @@ func TestAuditReaderRequestIDUnique(t *testing.T) {
 	blocks := collectBlocks(queue)
 	ids := make(map[uint64]bool)
 	for _, blk := range blocks {
-		ids[blk.requestID] = true
+		ids[blk.RequestID] = true
 	}
 	if len(ids) != 2 {
 		t.Errorf("expected 2 distinct requestIDs, got %d", len(ids))
@@ -371,8 +371,8 @@ func TestAuditReaderRequestIDUnique(t *testing.T) {
 }
 
 func TestAuditReaderCloseWithoutRead(t *testing.T) {
-	pool := newBlockPool(4*1024, 1024)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(4*1024, 1024)
+	queue := make(chan *AuditBlock, 16)
 
 	body := io.NopCloser(strings.NewReader("data"))
 	ar := newAuditReader(body, pool, &mockDropRecorder{}, queue, 1)
@@ -390,8 +390,8 @@ func TestAuditReaderCloseWithoutRead(t *testing.T) {
 }
 
 func TestAuditReaderEmptyBody(t *testing.T) {
-	pool := newBlockPool(4*1024, 1024)
-	queue := make(chan *auditBlock, 16)
+	pool := NewBlockPool(4*1024, 1024)
+	queue := make(chan *AuditBlock, 16)
 
 	body := io.NopCloser(strings.NewReader(""))
 	ar := newAuditReader(body, pool, &mockDropRecorder{}, queue, 1)

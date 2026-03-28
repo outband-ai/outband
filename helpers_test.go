@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bytes"
@@ -50,10 +50,10 @@ func waitForCondition(timeout, pollInterval time.Duration, check func() bool) er
 }
 
 // waitForJSONLCount polls the JSONL file at fpath until it contains at least
-// expectedCount parseable telemetryLog entries, or timeout expires.
+// expectedCount parseable TelemetryLog entries, or timeout expires.
 // Returns all parsed entries on success.
-func waitForJSONLCount(fpath string, expectedCount int, timeout time.Duration) ([]*telemetryLog, error) {
-	var entries []*telemetryLog
+func waitForJSONLCount(fpath string, expectedCount int, timeout time.Duration) ([]*TelemetryLog, error) {
+	var entries []*TelemetryLog
 	err := waitForCondition(timeout, 50*time.Millisecond, func() bool {
 		data, err := os.ReadFile(fpath)
 		if err != nil {
@@ -65,7 +65,7 @@ func waitForJSONLCount(fpath string, expectedCount int, timeout time.Duration) (
 			if len(line) == 0 {
 				continue
 			}
-			var entry telemetryLog
+			var entry TelemetryLog
 			if err := json.Unmarshal(line, &entry); err != nil {
 				continue
 			}

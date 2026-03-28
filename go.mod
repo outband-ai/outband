@@ -1,4 +1,4 @@
-module outband
+module github.com/outband-ai/outband
 
 go 1.26.1
 

@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bufio"
@@ -23,10 +23,10 @@ import (
 	"time"
 )
 
-func makeBatch(n int) []*telemetryLog {
-	batch := make([]*telemetryLog, n)
+func makeBatch(n int) []*TelemetryLog {
+	batch := make([]*TelemetryLog, n)
 	for i := range batch {
-		batch[i] = &telemetryLog{
+		batch[i] = &TelemetryLog{
 			RequestID:          uint64(i),
 			Timestamp:          time.Now(),
 			OriginalHash:       "abc123",
@@ -83,7 +83,7 @@ func TestJSONLWriterBasicWrite(t *testing.T) {
 	scanner := bufio.NewScanner(f)
 	count := 0
 	for scanner.Scan() {
-		var entry telemetryLog
+		var entry TelemetryLog
 		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
 			t.Fatalf("line %d: invalid JSON: %v", count, err)
 		}
@@ -195,7 +195,7 @@ func TestJSONLWriterNoSplitAcrossFiles(t *testing.T) {
 
 	// Verify each line is valid JSON.
 	for i, line := range lines {
-		var entry telemetryLog
+		var entry TelemetryLog
 		if err := json.Unmarshal([]byte(line), &entry); err != nil {
 			t.Fatalf("active file line %d: invalid JSON: %v", i, err)
 		}
@@ -213,7 +213,7 @@ func TestJSONLWriterEmptyBatch(t *testing.T) {
 	if _, err := w.Flush(nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.Flush([]*telemetryLog{}); err != nil {
+	if _, err := w.Flush([]*TelemetryLog{}); err != nil {
 		t.Fatal(err)
 	}
 }

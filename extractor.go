@@ -11,16 +11,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"bytes"
 	"fmt"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/buger/jsonparser"
 )
+
+// ---------------------------------------------------------------------------
+// Extractor registry for enterprise response-side extractors
+// ---------------------------------------------------------------------------
+
+var (
+	extractorRegistryMu sync.Mutex
+	extractorRegistry   = map[Direction]map[string]PayloadExtractor{}
+)
+
+// RegisterExtractor registers a PayloadExtractor for the given direction
+// and API format name (e.g., "openai", "anthropic"). Multiple extractors
+// can coexist per direction — one per API format.
+func RegisterExtractor(dir Direction, name string, ext PayloadExtractor) {
+	extractorRegistryMu.Lock()
+	defer extractorRegistryMu.Unlock()
+	if extractorRegistry[dir] == nil {
+		extractorRegistry[dir] = make(map[string]PayloadExtractor)
+	}
+	extractorRegistry[dir][name] = ext
+}
+
+// ExtractorForDirection returns the registered extractor for the given
+// direction and API format name, or nil if none is registered.
+func ExtractorForDirection(dir Direction, name string) PayloadExtractor {
+	extractorRegistryMu.Lock()
+	defer extractorRegistryMu.Unlock()
+	if m, ok := extractorRegistry[dir]; ok {
+		return m[name]
+	}
+	return nil
+}
 
 // ContentField represents a single natural-language text value extracted
 // from a structured JSON payload. Only content fields are extracted;

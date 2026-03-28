@@ -11,7 +11,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package main
+package outband
 
 import (
 	"fmt"
@@ -21,15 +21,15 @@ import (
 	"strings"
 )
 
-// piiCategory identifies a type of personally identifiable information.
-type piiCategory string
+// PIICategory identifies a type of personally identifiable information.
+type PIICategory string
 
 const (
-	piiSSN   piiCategory = "SSN"
-	piiCC    piiCategory = "CC_NUMBER"
-	piiEmail piiCategory = "EMAIL"
-	piiPhone piiCategory = "PHONE"
-	piiIPv4  piiCategory = "IP_ADDRESS"
+	PIISSN   PIICategory = "SSN"
+	PIICC    PIICategory = "CC_NUMBER"
+	PIIEmail PIICategory = "EMAIL"
+	PIIPhone PIICategory = "PHONE"
+	PIIIPv4  PIICategory = "IP_ADDRESS"
 )
 
 // ---------------------------------------------------------------------------
@@ -39,7 +39,7 @@ const (
 // Redactor processes a string and returns the redacted version along with
 // any PII categories detected. Implementations must be safe for concurrent use.
 type Redactor interface {
-	Redact(input string) (string, []piiCategory)
+	Redact(input string) (string, []PIICategory)
 	Name() string
 }
 
@@ -51,21 +51,26 @@ type RedactorChain struct {
 	redactors []Redactor
 }
 
+// NewRedactorChain creates a RedactorChain from the given redactors.
+func NewRedactorChain(redactors ...Redactor) *RedactorChain {
+	return &RedactorChain{redactors: redactors}
+}
+
 // Redact runs every redactor in order, deduplicating PII categories across
 // all redactors before returning.
-func (c *RedactorChain) Redact(input string) (string, []piiCategory) {
+func (c *RedactorChain) Redact(input string) (string, []PIICategory) {
 	text := input
-	catSet := make(map[piiCategory]struct{})
+	catSet := make(map[PIICategory]struct{})
 
 	for _, r := range c.redactors {
-		var cats []piiCategory
+		var cats []PIICategory
 		text, cats = r.Redact(text)
 		for _, cat := range cats {
 			catSet[cat] = struct{}{}
 		}
 	}
 
-	cats := make([]piiCategory, 0, len(catSet))
+	cats := make([]PIICategory, 0, len(catSet))
 	for cat := range catSet {
 		cats = append(cats, cat)
 	}
@@ -90,7 +95,7 @@ func (c *RedactorChain) Name() string {
 // piiPattern holds a compiled regex and its metadata for one PII type.
 type piiPattern struct {
 	re       *regexp.Regexp
-	category piiCategory
+	category PIICategory
 	validate func(match string) bool // optional post-match validation
 	tag      string                  // SOC 2 compliance control
 }
@@ -103,13 +108,13 @@ func init() {
 		// Email (most specific format — process first).
 		{
 			re:       regexp.MustCompile(`\b[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}\b`),
-			category: piiEmail,
+			category: PIIEmail,
 			tag:      "CC6.1",
 		},
 		// SSN: NNN-NN-NNNN.
 		{
 			re:       regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`),
-			category: piiSSN,
+			category: PIISSN,
 			tag:      "CC6.1",
 		},
 		// Credit card: prefix-constrained with optional separators.
@@ -124,7 +129,7 @@ func init() {
 					`|3[47][0-9]{2}[ -]?[0-9]{6}[ -]?[0-9]{5}` + // Amex
 					`)\b`,
 			),
-			category: piiCC,
+			category: PIICC,
 			validate: luhnValid,
 			tag:      "CC6.1",
 		},
@@ -133,13 +138,13 @@ func init() {
 		// without it, a \b is required before the area code.
 		{
 			re:       regexp.MustCompile(`(?:\+1[-.\s]?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|\b\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b)`),
-			category: piiPhone,
+			category: PIIPhone,
 			tag:      "CC6.1",
 		},
 		// IPv4: dotted quad, validated for 0-255 range.
 		{
 			re:       regexp.MustCompile(`\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b`),
-			category: piiIPv4,
+			category: PIIIPv4,
 			validate: validateIPv4,
 			tag:      "CC6.1",
 		},
@@ -161,8 +166,8 @@ func NewRegexRedactor() *RegexRedactor {
 
 // Redact applies all PII patterns to the input string, replacing matches
 // with tagged redaction markers.
-func (r *RegexRedactor) Redact(input string) (string, []piiCategory) {
-	catSet := make(map[piiCategory]struct{})
+func (r *RegexRedactor) Redact(input string) (string, []PIICategory) {
+	catSet := make(map[PIICategory]struct{})
 	result := input
 
 	for _, p := range r.patterns {
@@ -176,7 +181,7 @@ func (r *RegexRedactor) Redact(input string) (string, []piiCategory) {
 		})
 	}
 
-	cats := make([]piiCategory, 0, len(catSet))
+	cats := make([]PIICategory, 0, len(catSet))
 	for c := range catSet {
 		cats = append(cats, c)
 	}
@@ -188,13 +193,13 @@ func (r *RegexRedactor) Redact(input string) (string, []piiCategory) {
 func (r *RegexRedactor) Name() string { return "pattern-based" }
 
 // redactionMarker builds the replacement string, e.g. "[REDACTED:SSN:CC6.1]".
-func redactionMarker(cat piiCategory, tag string) string {
+func redactionMarker(cat PIICategory, tag string) string {
 	return fmt.Sprintf("[REDACTED:%s:%s]", cat, tag)
 }
 
-// sortCategories sorts a slice of piiCategory alphabetically for
+// sortCategories sorts a slice of PIICategory alphabetically for
 // deterministic output in telemetry logs.
-func sortCategories(cats []piiCategory) {
+func sortCategories(cats []PIICategory) {
 	sort.Slice(cats, func(i, j int) bool { return cats[i] < cats[j] })
 }
 
