@@ -36,6 +36,9 @@ var (
 // and API format name (e.g., "openai", "anthropic"). Multiple extractors
 // can coexist per direction — one per API format.
 func RegisterExtractor(dir Direction, name string, ext PayloadExtractor) {
+	if ext == nil {
+		panic(fmt.Sprintf("RegisterExtractor: nil extractor for direction %d, name %q", dir, name))
+	}
 	extractorRegistryMu.Lock()
 	defer extractorRegistryMu.Unlock()
 	if extractorRegistry[dir] == nil {
