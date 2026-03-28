@@ -83,7 +83,6 @@ assert() {
 }
 
 PROXY_URL="http://localhost:8081"
-METRICS_URL="http://localhost:9091"
 LOG_DIR="demo-output/logs"
 EVIDENCE_DIR="demo-output/evidence"
 
@@ -100,8 +99,8 @@ echo ""
 echo -e "${BOLD}[SCENE 1] Starting sidecar proxy...${NC}"
 
 mkdir -p "$LOG_DIR" "$EVIDENCE_DIR"
-docker compose $COMPOSE_FILES build --quiet 2>/dev/null
-docker compose $COMPOSE_FILES up -d 2>/dev/null
+docker compose $COMPOSE_FILES build --quiet
+docker compose $COMPOSE_FILES up -d --wait --wait-timeout 60
 
 echo -e "  ${DIM}[OUTBAND] Target: http://mockllm:9090 (mock OpenAI endpoint)${NC}"
 echo -e "  ${DIM}[OUTBAND] Listening: localhost:8081${NC}"
@@ -112,6 +111,12 @@ if poll_until 30 0.5 curl -sf "$PROXY_URL/healthz"; then
 else
     echo -e "  ${RED}[OUTBAND] Health check: ✗ FAILED${NC}"
     echo -e "  ${RED}Proxy did not become healthy within 30s${NC}"
+    echo -e "  ${DIM}--- container status ---${NC}"
+    docker compose $COMPOSE_FILES ps 2>/dev/null || true
+    echo -e "  ${DIM}--- proxy logs ---${NC}"
+    docker compose $COMPOSE_FILES logs proxy 2>/dev/null | tail -20 || true
+    echo -e "  ${DIM}--- mockllm logs ---${NC}"
+    docker compose $COMPOSE_FILES logs mockllm 2>/dev/null | tail -10 || true
     exit 1
 fi
 
