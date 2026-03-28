@@ -836,11 +836,23 @@ func TestIntegrationDropCounter(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var successCount atomic.Int64
+	var sendErrors atomic.Int64
 	for i := 0; i < totalRequests; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			resp := sendIntegrationRequest(t, concurrentTestClient, env.proxyURL, bigContent)
+			body := fmt.Sprintf(`{"model":"gpt-4","messages":[{"role":"user","content":%q}]}`, bigContent)
+			req, err := http.NewRequest("POST", env.proxyURL+"/v1/chat/completions", strings.NewReader(body))
+			if err != nil {
+				sendErrors.Add(1)
+				return
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := concurrentTestClient.Do(req)
+			if err != nil {
+				sendErrors.Add(1)
+				return
+			}
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()
 			if resp.StatusCode == http.StatusOK {
@@ -852,6 +864,10 @@ func TestIntegrationDropCounter(t *testing.T) {
 	// wg.Wait() is sufficient: drops are recorded synchronously in the
 	// TeeReader hot path before the HTTP response is delivered.
 	wg.Wait()
+
+	if errs := sendErrors.Load(); errs > 0 {
+		t.Fatalf("%d requests failed to send", errs)
+	}
 
 	// All requests must be forwarded (fail-open).
 	if got := successCount.Load(); got != totalRequests {

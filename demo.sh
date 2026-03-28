@@ -180,9 +180,9 @@ if poll_until 10 0.2 bash -c "[ \$(wc -l < '$LOG_DIR/outband-telemetry-current.j
         echo -e "         └── ${YELLOW}[REDACTED:SSN:CC6.1]${NC}      123-45-6789"
     fi
 
-    assert "Email detected" echo "$PII_CATS" | grep -q "EMAIL"
-    assert "Credit card detected" echo "$PII_CATS" | grep -q "CC_NUMBER"
-    assert "SSN detected" echo "$PII_CATS" | grep -q "SSN"
+    assert "Email detected" grep -q "EMAIL" <<< "$PII_CATS"
+    assert "Credit card detected" grep -q "CC_NUMBER" <<< "$PII_CATS"
+    assert "SSN detected" grep -q "SSN" <<< "$PII_CATS"
 else
     echo -e "  ${RED}[AUDIT] PII telemetry entry not written within timeout${NC}"
     FAILURES=$((FAILURES + 1))
@@ -212,8 +212,8 @@ if [ -f "$LOG_DIR/outband-telemetry-current.jsonl" ]; then
     }' | sed 's/^/  /'
     echo ""
 
-    assert "Cryptographic hashes present" echo "$DETAIL_ENTRY" | jq -e '.original_hash | length == 64' > /dev/null
-    assert "Capture complete" echo "$DETAIL_ENTRY" | jq -e '.capture_complete == true' > /dev/null
+    assert "Cryptographic hashes present" jq -e '.original_hash | length == 64' <<< "$DETAIL_ENTRY"
+    assert "Capture complete" jq -e '.capture_complete == true' <<< "$DETAIL_ENTRY"
 fi
 
 pause
