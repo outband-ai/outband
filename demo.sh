@@ -18,6 +18,7 @@ MISSING=()
 command -v jq &>/dev/null || MISSING+=("jq")
 command -v curl &>/dev/null || MISSING+=("curl")
 command -v docker &>/dev/null || MISSING+=("docker")
+docker compose version &>/dev/null || MISSING+=("docker-compose")
 
 if [ ${#MISSING[@]} -ne 0 ]; then
     echo "Error: Missing required tools: ${MISSING[*]}"
@@ -98,6 +99,9 @@ echo ""
 
 echo -e "${BOLD}[SCENE 1] Starting sidecar proxy...${NC}"
 
+# Clean stale artifacts from previous runs to prevent false assertions.
+if [ -d "$LOG_DIR" ]; then find "$LOG_DIR" -type f -delete; fi
+if [ -d "$EVIDENCE_DIR" ]; then find "$EVIDENCE_DIR" -type f -delete; fi
 mkdir -p "$LOG_DIR" "$EVIDENCE_DIR"
 # Run proxy container as current user so volume-mounted files are
 # readable by the host (demo script reads JSONL/evidence files directly).
@@ -234,10 +238,26 @@ echo ""
 echo -e "${BOLD}[SCENE 5] Evidence summary${NC}"
 echo -e "  ${DIM}Waiting for evidence summary (10s aggregation window)...${NC}"
 
+# Poll for a non-partial evidence summary (partial_window == false).
+# With --summary-interval 10s, a partial window may appear first during
+# container startup; we need the complete window for accurate assertions.
 EVIDENCE_FILE=""
-if poll_until 30 0.5 bash -c 'ls '"$EVIDENCE_DIR"'/*.json 2>/dev/null | head -1 | grep -q .'; then
-    EVIDENCE_FILE=$(ls "$EVIDENCE_DIR"/*.json 2>/dev/null | head -1)
-fi
+poll_until 30 0.5 bash -c '
+    for f in $(ls -t "'"$EVIDENCE_DIR"'"/*.json 2>/dev/null); do
+        if jq -e ".partial_window == false" "$f" >/dev/null 2>&1; then
+            exit 0
+        fi
+    done
+    exit 1
+' && {
+    # Select the most recent non-partial evidence file by mtime.
+    for f in $(ls -t "$EVIDENCE_DIR"/*.json 2>/dev/null); do
+        if jq -e '.partial_window == false' "$f" >/dev/null 2>&1; then
+            EVIDENCE_FILE="$f"
+            break
+        fi
+    done
+}
 
 if [ -n "$EVIDENCE_FILE" ]; then
     echo ""
