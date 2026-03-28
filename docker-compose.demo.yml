@@ -1,0 +1,29 @@
+services:
+  mockllm:
+    environment:
+      MOCK_DELAY: "50ms"
+      MOCK_CHUNKS: "5"
+      MOCK_CHUNK_DELAY: "30ms"
+
+  proxy:
+    command:
+      - "--target"
+      - "http://mockllm:9090"
+      - "--listen"
+      - "0.0.0.0:8080"
+      - "--summary-interval"
+      - "10s"
+      - "--evidence-dir"
+      - "/data/evidence"
+      - "--log-dir"
+      - "/data/logs"
+      - "--flush-interval"
+      - "1s"
+      - "--metrics-port"
+      - "9091"
+    ports:
+      - "8081:8080"
+      - "9091:9091"
+    volumes:
+      - ./demo-output/logs:/data/logs
+      - ./demo-output/evidence:/data/evidence
